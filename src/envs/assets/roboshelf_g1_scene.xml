@@ -1,0 +1,4 @@
+<mujoco model="roboshelf_g1_retail">
+  <include file="/opt/homebrew/Caskroom/miniforge/base/lib/python3.13/site-packages/mujoco_playground/external_deps/mujoco_menagerie/unitree_g1/g1.xml"/>
+  <include file="roboshelf_retail_store.xml"/>
+</mujoco>
