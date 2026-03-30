@@ -1,37 +1,20 @@
 #!/usr/bin/env python3
 """
-Roboshelf AI — Fázis 1 javított tanítási script (v2)
+Roboshelf AI — Fázis 1 javított tanítási script (v2.1)
 
-Javítások az eredeti scripthez képest:
-  1. VecNormalize fix: eval és --watch is betölti a VecNormalize .pkl fájlt
-  2. --continue-from automatikusan betölti a mellette lévő VecNormalize .pkl-t
-  3. Javított hiperparaméterek: alacsonyabb LR, szűkebb clip range, nagyobb batch
-  4. Automatikus VecNormalize mentés minden checkpoint mellé
-  5. Jobb logging: WandB opcionális, TensorBoard mindig
+Javítások v2.0-hoz képest:
+  - BUGFIX: eval env VecNormalize wrapper most mindig helyesen van beállítva
+  - BUGFIX: env.seed() eltávolítva (törte a VecNormalize wrapper detektálást)
+  - --continue-from automatikusan betölti a VecNormalize .pkl-t
 
 Használat:
-  # Gyors teszt (~5 perc)
-  python roboshelf_phase1_train_v2.py
-
-  # Közepes tanítás (~1-2 óra, javított hiperparaméterekkel)
-  python roboshelf_phase1_train_v2.py --level kozepes
-
-  # Teljes tanítás (~6-10 óra)
-  python roboshelf_phase1_train_v2.py --level teljes
-
-  # Éjszakai tanítás (~15+ óra)
-  python roboshelf_phase1_train_v2.py --level ejszakai
-
-  # Folytatás korábbi modellből (automatikusan tölti a VecNormalize-t is!)
+  python roboshelf_phase1_train_v2.py                        # teszt (~5 perc)
+  python roboshelf_phase1_train_v2.py --level kozepes        # ~1-2 óra
+  python roboshelf_phase1_train_v2.py --level teljes         # ~6-10 óra
+  python roboshelf_phase1_train_v2.py --level ejszakai       # ~15+ óra
   python roboshelf_phase1_train_v2.py --level ejszakai --continue-from models/best/best_model.zip
-
-  # Betanított modell megtekintése (VecNormalize-zel!)
   python roboshelf_phase1_train_v2.py --watch
-
-  # Kiértékelés (VecNormalize-zel!)
   python roboshelf_phase1_train_v2.py --eval
-
-  # Random baseline
   python roboshelf_phase1_train_v2.py --random
 """
 
@@ -49,7 +32,13 @@ RESULTS_DIR = Path.home() / "Documents" / "roboshelf-ai-dev" / "roboshelf-result
 MODELS_DIR = RESULTS_DIR / "models"
 LOGS_DIR = RESULTS_DIR / "logs"
 
-# --- Szintek konfigurációja (v2 — javított hiperparaméterek) ---
+# Kaggle/Colab kompatibilitás
+if not RESULTS_DIR.parent.exists():
+    RESULTS_DIR = Path.cwd() / "roboshelf-results"
+    MODELS_DIR = RESULTS_DIR / "models"
+    LOGS_DIR = RESULTS_DIR / "logs"
+
+# --- Szintek konfigurációja ---
 LEVELS = {
     "teszt": {
         "total_timesteps": 50_000,
@@ -64,17 +53,17 @@ LEVELS = {
     "kozepes": {
         "total_timesteps": 2_000_000,
         "n_steps": 2048,
-        "batch_size": 128,       # v2: 64 → 128
+        "batch_size": 128,
         "n_epochs": 10,
         "n_envs": 4,
-        "learning_rate": 1e-4,   # v2: 3e-4 → 1e-4 (stabilabb)
-        "clip_range": 0.15,      # v2: 0.2 → 0.15 (kevesebb oszcilláció)
+        "learning_rate": 1e-4,
+        "clip_range": 0.15,
         "description": "Közepes tanítás (~1-2 óra)",
     },
     "teljes": {
         "total_timesteps": 10_000_000,
         "n_steps": 2048,
-        "batch_size": 256,       # v2: nagyobb batch
+        "batch_size": 256,
         "n_epochs": 10,
         "n_envs": 4,
         "learning_rate": 1e-4,
@@ -82,31 +71,27 @@ LEVELS = {
         "description": "Teljes tanítás (~6-10 óra)",
     },
     "ejszakai": {
-        "total_timesteps": 50_000_000,  # v2: 30M → 50M
+        "total_timesteps": 50_000_000,
         "n_steps": 2048,
         "batch_size": 256,
         "n_epochs": 10,
         "n_envs": 4,
         "learning_rate": 1e-4,
-        "clip_range": 0.1,       # v2: 0.2 → 0.1 (nagyon stabil)
+        "clip_range": 0.1,
         "description": "Éjszakai tanítás (~15+ óra)",
     },
 }
 
 
 def find_vecnormalize_pkl(model_path: str) -> str | None:
-    """
-    Megkeresi a VecNormalize .pkl fájlt egy modell mellett.
-
-    Keresési sorrend:
-      1. <model_path>_vecnormalize.pkl (eredeti naming)
-      2. <model_dir>/vecnormalize.pkl
-      3. <model_dir>/../vecnormalize.pkl (best/ almappából)
-    """
+    """Megkeresi a VecNormalize .pkl fájlt egy modell mellett."""
+    if model_path is None:
+        return None
     model_path = Path(model_path)
     candidates = [
         model_path.with_name(model_path.stem + "_vecnormalize.pkl"),
         model_path.parent / "vecnormalize.pkl",
+        model_path.parent / "best_model_vecnormalize.pkl",
         model_path.parent.parent / "vecnormalize.pkl",
     ]
     for c in candidates:
@@ -117,7 +102,7 @@ def find_vecnormalize_pkl(model_path: str) -> str | None:
 
 def make_env(n_envs: int = 1, seed: int = 42):
     """Létrehozza a vektorizált Humanoid-v5 környezetet VecNormalize-zel."""
-    from stable_baselines3.common.vec_env import SubprocVecEnv, VecNormalize
+    from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv, VecNormalize
     from stable_baselines3.common.utils import set_random_seed
 
     def make_single(rank):
@@ -131,18 +116,16 @@ def make_env(n_envs: int = 1, seed: int = 42):
     if n_envs > 1:
         env = SubprocVecEnv([make_single(i) for i in range(n_envs)])
     else:
-        from stable_baselines3.common.vec_env import DummyVecEnv
         env = DummyVecEnv([make_single(0)])
 
     env = VecNormalize(env, norm_obs=True, norm_reward=True, clip_obs=10.0, clip_reward=10.0)
     return env
 
 
-def make_eval_env(vecnorm_path: str | None = None, seed: int = 99):
+def make_eval_env(vecnorm_path: str | None = None):
     """
     Létrehozza a kiértékelő környezetet.
-
-    v2 FIX: Ha van VecNormalize .pkl, betölti az edzés statisztikákat!
+    MINDIG VecNormalize-zel wrappelt — ez kritikus az SB3 sync_envs_normalization-höz.
     """
     from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
@@ -151,13 +134,12 @@ def make_eval_env(vecnorm_path: str | None = None, seed: int = 99):
     if vecnorm_path and Path(vecnorm_path).exists():
         print(f"  ✅ VecNormalize betöltve: {vecnorm_path}")
         env = VecNormalize.load(vecnorm_path, env)
-        env.training = False      # Ne frissítse a statisztikákat eval közben
-        env.norm_reward = False   # Ne normalizálja a reward-ot eval közben
+        env.training = False
+        env.norm_reward = False
     else:
-        print("  ⚠️  VecNormalize nélkül fut — a reward értékek alacsonyabbak lehetnek!")
+        print("  ℹ️  Új VecNormalize az eval env-hez (friss start)")
         env = VecNormalize(env, norm_obs=True, norm_reward=False, training=False)
 
-    env.seed(seed)
     return env
 
 
@@ -182,7 +164,7 @@ def train(args):
     run_name = f"humanoid_ppo_{args.level}_{timestamp}"
 
     print(f"\n{'='*60}")
-    print(f"  ROBOSHELF AI — Fázis 1 tanítás v2")
+    print(f"  ROBOSHELF AI — Fázis 1 tanítás v2.1")
     print(f"  Szint: {args.level} ({cfg['description']})")
     print(f"  Timesteps: {cfg['total_timesteps']:,}")
     print(f"  Learning rate: {cfg['learning_rate']}")
@@ -190,7 +172,7 @@ def train(args):
     print(f"  Batch size: {cfg['batch_size']}")
     print(f"{'='*60}\n")
 
-    # Könyvtárak létrehozása
+    # Könyvtárak
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
     best_dir = MODELS_DIR / "best"
@@ -202,11 +184,15 @@ def train(args):
     # Modell
     policy_kwargs = dict(net_arch=dict(pi=[256, 256], vf=[256, 256]))
 
+    # Device detektálás
+    import torch
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"  🖥️  Device: {device}")
+
     if args.continue_from:
         print(f"  📂 Modell betöltése: {args.continue_from}")
-        model = PPO.load(args.continue_from, env=env)
+        model = PPO.load(args.continue_from, env=env, device=device)
 
-        # v2 FIX: VecNormalize automatikus betöltése
         vecnorm_path = find_vecnormalize_pkl(args.continue_from)
         if vecnorm_path:
             from stable_baselines3.common.vec_env import VecNormalize
@@ -216,13 +202,11 @@ def train(args):
         else:
             print("  ⚠️  VecNormalize .pkl nem található — új statisztikákkal indul")
 
-        # Hiperparaméterek frissítése v2 értékekre
         model.learning_rate = cfg["learning_rate"]
         model.clip_range = lambda _: cfg["clip_range"]
         model.n_steps = cfg["n_steps"]
         model.batch_size = cfg["batch_size"]
         model.n_epochs = cfg["n_epochs"]
-        print(f"  🔧 Hiperparaméterek frissítve v2 értékekre")
     else:
         model = PPO(
             "MlpPolicy",
@@ -235,16 +219,16 @@ def train(args):
             gamma=0.99,
             gae_lambda=0.95,
             clip_range=cfg["clip_range"],
-            ent_coef=0.001,    # v2: 0 → 0.001 (kis entrópia bonus az explor.-hoz)
+            ent_coef=0.001,
             vf_coef=0.5,
             max_grad_norm=0.5,
             tensorboard_log=str(LOGS_DIR),
             verbose=1,
             seed=42,
-            device="cpu",
+            device=device,
         )
 
-    # Eval callback — v2: VecNormalize-zel
+    # Eval env — MINDIG VecNormalize wrappelt!
     eval_vecnorm_path = find_vecnormalize_pkl(args.continue_from) if args.continue_from else None
     eval_env = make_eval_env(eval_vecnorm_path)
 
@@ -277,16 +261,15 @@ def train(args):
     elapsed = time.time() - start_time
     print(f"\n  ⏱️  Tanítás befejezve: {elapsed/60:.1f} perc ({elapsed/3600:.1f} óra)")
 
-    # Mentés VecNormalize-zel
+    # Mentés
     final_prefix = str(MODELS_DIR / f"{run_name}_final")
     save_with_vecnormalize(model, env, final_prefix)
 
-    # Best modell mellé is VecNormalize mentése
     best_vecnorm = str(best_dir / "best_model_vecnormalize.pkl")
     env.save(best_vecnorm)
     print(f"  💾 Best VecNormalize: {best_vecnorm}")
 
-    # Azonnali kiértékelés a helyes VecNormalize-zel
+    # Azonnali kiértékelés
     print(f"\n  📊 Azonnali kiértékelés (VecNormalize-zel)...")
     eval_env_final = make_eval_env(f"{final_prefix}_vecnormalize.pkl")
     evaluate_model(model, eval_env_final, n_episodes=5)
@@ -297,7 +280,7 @@ def train(args):
 
 
 def evaluate_model(model, env, n_episodes=5):
-    """Modell kiértékelése — helyes reward értékekkel."""
+    """Modell kiértékelése."""
     rewards = []
     lengths = []
     for ep in range(n_episodes):
@@ -330,7 +313,6 @@ def watch(args):
     print(f"  👁️  Modell megtekintése: {model_path}")
     model = PPO.load(model_path)
 
-    # v2 FIX: VecNormalize betöltése vizualizációhoz is
     vecnorm_path = find_vecnormalize_pkl(model_path)
     env = gym.make("Humanoid-v5", render_mode="human")
 
@@ -372,7 +354,6 @@ def evaluate(args):
     print(f"\n  📊 Kiértékelés: {model_path}")
     model = PPO.load(model_path)
 
-    # v2 FIX: VecNormalize keresése és betöltése
     vecnorm_path = find_vecnormalize_pkl(model_path)
     eval_env = make_eval_env(vecnorm_path)
     evaluate_model(model, eval_env, n_episodes=10)
@@ -400,15 +381,13 @@ def random_baseline(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Roboshelf AI — Humanoid RL tanítás v2")
+    parser = argparse.ArgumentParser(description="Roboshelf AI — Humanoid RL tanítás v2.1")
     parser.add_argument("--level", choices=list(LEVELS.keys()), default="teszt")
-    parser.add_argument("--continue-from", type=str, default=None,
-                        help="Korábbi modell .zip útvonala (VecNormalize automatikusan betöltődik)")
-    parser.add_argument("--watch", action="store_true", help="Betanított modell megtekintése")
-    parser.add_argument("--eval", action="store_true", help="Modell kiértékelése")
-    parser.add_argument("--random", action="store_true", help="Random baseline")
-    parser.add_argument("--model", type=str, default=None,
-                        help="Modell útvonala --watch és --eval módhoz")
+    parser.add_argument("--continue-from", type=str, default=None)
+    parser.add_argument("--watch", action="store_true")
+    parser.add_argument("--eval", action="store_true")
+    parser.add_argument("--random", action="store_true")
+    parser.add_argument("--model", type=str, default=None)
 
     args = parser.parse_args()
 
