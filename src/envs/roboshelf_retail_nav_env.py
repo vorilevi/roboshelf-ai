@@ -1,0 +1,343 @@
+#!/usr/bin/env python3
+"""
+Roboshelf AI — Fázis 2: G1 lokomóció a retail boltban
+
+Gymnasium wrapper a Unitree G1 navigációjához a kiskereskedelmi környezetben.
+A robot megtanulja a boltban való járást: egyensúly, akadálykerülés, célnavigáció.
+
+Feladat: A G1 a start pozícióból (y=0.5) eljut a raktárhoz (y=3.8).
+Reward:
+  - Előre haladás jutalma (y irányban)
+  - Egyensúly megtartása (nem esik el)
+  - Kontroll költség (simább mozgás)
+  - Akadály-ütközés büntetés
+  - Célba érkezés bonus
+
+Observation: G1 propriocepció (qpos, qvel) + cél relatív pozíciója
+Action: 29 DoF nyomaték parancsok
+
+Használat:
+  # Regisztrálás után:
+  env = gym.make('RoboshelfRetailNav-v0')
+
+  # Vagy közvetlenül:
+  env = RoboshelfRetailNavEnv()
+"""
+
+import os
+import numpy as np
+import gymnasium as gym
+from gymnasium import spaces
+from gymnasium.envs.registration import register
+import mujoco
+
+
+# --- Környezet regisztráció ---
+try:
+    register(
+        id='RoboshelfRetailNav-v0',
+        entry_point='roboshelf_retail_nav_env:RoboshelfRetailNavEnv',
+        max_episode_steps=1000,
+    )
+except gym.error.Error:
+    pass  # Már regisztrálva
+
+
+class RoboshelfRetailNavEnv(gym.Env):
+    """
+    Unitree G1 navigáció a Roboshelf retail bolt környezetben.
+
+    A robot a bolt elején indul (y=0.5) és el kell jutnia a raktárhoz (y=3.8).
+    Közben ki kell kerülnie a gondola polcokat és meg kell tartania az egyensúlyt.
+    """
+
+    metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 50}
+
+    def __init__(self, render_mode=None):
+        super().__init__()
+        self.render_mode = render_mode
+
+        # --- MJCF betöltés ---
+        self._load_model()
+
+        # --- Spaces ---
+        # Observation: robot qpos (29 joint + 7 freejoint) + qvel (29+6) + target rel pos (2)
+        obs_size = self._get_obs_size()
+        self.observation_space = spaces.Box(
+            low=-np.inf, high=np.inf, shape=(obs_size,), dtype=np.float64
+        )
+
+        # Action: 29 aktuátor (G1 joint position targets)
+        self.action_space = spaces.Box(
+            low=-1.0, high=1.0, shape=(self.model.nu,), dtype=np.float64
+        )
+
+        # --- Feladat paraméterek ---
+        self.target_pos = np.array([0.0, 3.8])  # Raktár pozíció (x, y)
+        self.start_pos = np.array([0.0, 0.5])   # Robot start (x, y)
+
+        # --- Reward súlyok ---
+        self.w_forward = 2.0       # Előre haladás jutalma
+        self.w_healthy = 5.0       # Egyensúly megtartása
+        self.w_ctrl = -0.01        # Kontroll költség
+        self.w_contact = -0.001    # Kontakt költség
+        self.w_goal = 100.0        # Célba érkezés bonus
+
+        # --- Állapot ---
+        self._healthy_z_range = (0.5, 1.5)  # G1 törzs magasság tartomány
+        self._prev_dist_to_target = None
+
+        # Renderer
+        self._renderer = None
+        if render_mode == "rgb_array":
+            self._renderer = mujoco.Renderer(self.model, width=640, height=480)
+
+    def _load_model(self):
+        """Betölti a G1 + retail bolt kombinált MJCF modellt."""
+        # Keressük a G1 modellt
+        g1_candidates = [
+            # Kaggle / Colab — pip-pel telepített mujoco_playground
+            self._find_in_site_packages("mujoco_playground/external_deps/mujoco_menagerie/unitree_g1"),
+            # MacBook Homebrew miniforge
+            "/opt/homebrew/Caskroom/miniforge/base/lib/python3.13/site-packages/mujoco_playground/external_deps/mujoco_menagerie/unitree_g1",
+            # Standalone menagerie
+            self._find_in_site_packages("mujoco_menagerie/unitree_g1"),
+            # Lokális klón
+            os.path.expanduser("~/mujoco_menagerie/unitree_g1"),
+        ]
+
+        g1_dir = None
+        for path in g1_candidates:
+            if path and os.path.exists(os.path.join(str(path), "g1.xml")):
+                g1_dir = str(path)
+                break
+
+        if g1_dir is None:
+            # Fallback: MuJoCo Playground telepítése szükséges
+            raise FileNotFoundError(
+                "Unitree G1 MJCF nem található! Telepítsd: pip install playground\n"
+                "Vagy klónozd: git clone https://github.com/google-deepmind/mujoco_menagerie.git"
+            )
+
+        # Retail bolt XML keresése
+        store_xml = self._find_store_xml()
+
+        # Kombinált XML létrehozása (a G1 mappából, hogy a meshdir helyes legyen)
+        import tempfile
+        combined_xml = f"""<mujoco model="roboshelf_g1_retail_nav">
+  <include file="g1.xml"/>
+  <include file="{store_xml}"/>
+</mujoco>"""
+
+        self._combined_xml_path = os.path.join(g1_dir, "_roboshelf_nav_tmp.xml")
+        with open(self._combined_xml_path, "w") as f:
+            f.write(combined_xml)
+
+        self.model = mujoco.MjModel.from_xml_path(self._combined_xml_path)
+        self.data = mujoco.MjData(self.model)
+
+        # G1 torso body index megkeresése
+        self._torso_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "pelvis")
+        if self._torso_id == -1:
+            # Fallback: első nem-world body
+            self._torso_id = 1
+
+        print(f"  ✅ Retail Nav env betöltve: {self.model.nbody} body, {self.model.nu} actuators")
+
+    def _find_in_site_packages(self, subpath):
+        """Keres egy útvonalat a site-packages-ben."""
+        import sys
+        for p in sys.path:
+            if "site-packages" in p:
+                full = os.path.join(p, subpath)
+                if os.path.exists(full):
+                    return full
+        return None
+
+    def _find_store_xml(self):
+        """Megkeresi a retail bolt XML-t."""
+        candidates = [
+            os.path.join(os.path.dirname(__file__), "assets", "roboshelf_retail_store.xml"),
+            os.path.join(os.getcwd(), "src", "envs", "assets", "roboshelf_retail_store.xml"),
+            os.path.join(os.getcwd(), "roboshelf_retail_store.xml"),
+        ]
+        for c in candidates:
+            if os.path.exists(c):
+                return os.path.abspath(c)
+
+        raise FileNotFoundError(
+            "roboshelf_retail_store.xml nem található!\n"
+            f"Keresett helyek: {candidates}"
+        )
+
+    def _get_obs_size(self):
+        """Kiszámítja az observation vektor méretét."""
+        # qpos (nq) + qvel (nv) + target_rel_xy (2)
+        return self.model.nq + self.model.nv + 2
+
+    def _get_obs(self):
+        """Összeállítja az observation vektort."""
+        # Robot pozíció (x,y a padlón)
+        robot_xy = self.data.body(self._torso_id).xpos[:2]
+        target_rel = self.target_pos - robot_xy
+
+        obs = np.concatenate([
+            self.data.qpos.flat.copy(),
+            self.data.qvel.flat.copy(),
+            target_rel,
+        ])
+        return obs
+
+    def _is_healthy(self):
+        """Ellenőrzi, hogy a robot áll-e (nem esett el)."""
+        torso_z = self.data.body(self._torso_id).xpos[2]
+        return self._healthy_z_range[0] < torso_z < self._healthy_z_range[1]
+
+    def _compute_reward(self):
+        """Kiszámítja a reward-ot."""
+        robot_xy = self.data.body(self._torso_id).xpos[:2]
+        dist_to_target = np.linalg.norm(self.target_pos - robot_xy)
+
+        # 1. Előre haladás jutalom (a célhoz közeledés)
+        if self._prev_dist_to_target is not None:
+            forward_reward = (self._prev_dist_to_target - dist_to_target) * self.w_forward
+        else:
+            forward_reward = 0.0
+        self._prev_dist_to_target = dist_to_target
+
+        # 2. Egyensúly jutalom
+        healthy_reward = self.w_healthy if self._is_healthy() else 0.0
+
+        # 3. Kontroll költség (simább mozgás = jobb)
+        ctrl_cost = self.w_ctrl * np.sum(np.square(self.data.ctrl))
+
+        # 4. Kontakt költség (ütközések büntetése)
+        contact_forces = self.data.cfrc_ext.flat.copy()
+        contact_cost = self.w_contact * np.sum(np.square(contact_forces))
+
+        # 5. Cél bonus (ha elérte a raktárt)
+        goal_bonus = 0.0
+        if dist_to_target < 0.5:
+            goal_bonus = self.w_goal
+
+        total_reward = forward_reward + healthy_reward + ctrl_cost + contact_cost + goal_bonus
+
+        info = {
+            "forward_reward": forward_reward,
+            "healthy_reward": healthy_reward,
+            "ctrl_cost": ctrl_cost,
+            "contact_cost": contact_cost,
+            "goal_bonus": goal_bonus,
+            "dist_to_target": dist_to_target,
+            "torso_z": self.data.body(self._torso_id).xpos[2],
+            "robot_xy": robot_xy.copy(),
+        }
+
+        return total_reward, info
+
+    def reset(self, seed=None, options=None):
+        """Környezet resetelése."""
+        super().reset(seed=seed)
+
+        mujoco.mj_resetData(self.model, self.data)
+
+        # G1 kezdő pozíció beállítása (robot_start site: x=0, y=0.5)
+        # A freejoint qpos: [x, y, z, qw, qx, qy, qz]
+        if self.model.nq > 7:
+            self.data.qpos[0] = 0.0    # x
+            self.data.qpos[1] = 0.5    # y (bolt eleje)
+            self.data.qpos[2] = 0.75   # z (álló magasság)
+            self.data.qpos[3] = 1.0    # qw (egyenesen áll)
+            self.data.qpos[4:7] = 0.0  # qx, qy, qz
+
+        # Forward kinematics
+        mujoco.mj_forward(self.model, self.data)
+
+        self._prev_dist_to_target = np.linalg.norm(
+            self.target_pos - self.data.body(self._torso_id).xpos[:2]
+        )
+
+        obs = self._get_obs()
+        info = {"dist_to_target": self._prev_dist_to_target}
+
+        return obs, info
+
+    def step(self, action):
+        """Egy szimuláció lépés végrehajtása."""
+        # Akció skálázás: [-1, 1] → aktuátor tartomány
+        action = np.clip(action, -1.0, 1.0)
+
+        # Aktuátor vezérlés beállítása
+        if self.model.nu > 0:
+            # Skálázás a ctrlrange-hez
+            ctrl_range = self.model.actuator_ctrlrange
+            ctrl_mean = (ctrl_range[:, 0] + ctrl_range[:, 1]) / 2
+            ctrl_half = (ctrl_range[:, 1] - ctrl_range[:, 0]) / 2
+            self.data.ctrl[:] = ctrl_mean + action * ctrl_half
+
+        # Fizikai szimuláció (5 sub-step a stabilitásért)
+        for _ in range(5):
+            mujoco.mj_step(self.model, self.data)
+
+        # Observation
+        obs = self._get_obs()
+
+        # Reward
+        reward, info = self._compute_reward()
+
+        # Terminated: robot elesett
+        terminated = not self._is_healthy()
+
+        # Truncated: max lépésszám (Gymnasium kezeli)
+        truncated = False
+
+        return obs, reward, terminated, truncated, info
+
+    def render(self):
+        """Rendering."""
+        if self.render_mode == "rgb_array" and self._renderer is not None:
+            mujoco.mj_forward(self.model, self.data)
+            self._renderer.update_scene(self.data)
+            return self._renderer.render()
+        return None
+
+    def close(self):
+        """Cleanup."""
+        if self._renderer is not None:
+            self._renderer.close()
+        # Temp fájl törlése
+        if hasattr(self, '_combined_xml_path') and os.path.exists(self._combined_xml_path):
+            try:
+                os.remove(self._combined_xml_path)
+            except:
+                pass
+
+
+# === Standalone teszt ===
+if __name__ == "__main__":
+    print("Roboshelf Retail Nav Env — teszt")
+    print("=" * 40)
+
+    env = RoboshelfRetailNavEnv()
+    obs, info = env.reset()
+
+    print(f"Observation shape: {obs.shape}")
+    print(f"Action space: {env.action_space.shape}")
+    print(f"Kezdő távolság a céltól: {info['dist_to_target']:.2f}m")
+    print()
+
+    # Random policy teszt
+    total_reward = 0
+    for step in range(100):
+        action = env.action_space.sample()
+        obs, reward, terminated, truncated, info = env.step(action)
+        total_reward += reward
+        if terminated:
+            print(f"  Robot elesett a {step}. lépésnél")
+            break
+
+    print(f"\n  100 lépés reward: {total_reward:.1f}")
+    print(f"  Végső távolság a céltól: {info['dist_to_target']:.2f}m")
+    print(f"  Robot magasság: {info['torso_z']:.2f}m")
+    print(f"\n✅ Env működik!")
+    env.close()

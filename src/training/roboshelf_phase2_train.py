@@ -1,0 +1,244 @@
+#!/usr/bin/env python3
+"""
+Roboshelf AI — Fázis 2: G1 Retail Navigáció PPO tanítás
+
+Kaggle/Colab-kompatibilis tanítási script.
+A G1 humanoid megtanul járni a retail boltban a raktárig.
+
+Használat (Kaggle cellában):
+  !python roboshelf_phase2_train.py --level teszt     # ~5 perc
+  !python roboshelf_phase2_train.py --level kozepes   # ~30 perc
+  !python roboshelf_phase2_train.py --level teljes    # ~2-4 óra
+"""
+
+import argparse
+import os
+import sys
+import time
+from pathlib import Path
+
+import numpy as np
+import gymnasium as gym
+
+# --- Output mappa (Kaggle/Colab/lokális kompatibilis) ---
+if os.path.exists("/kaggle/working"):
+    OUTPUT_DIR = Path("/kaggle/working/roboshelf-phase2-results")
+elif os.path.exists("/content"):
+    OUTPUT_DIR = Path("/content/roboshelf-phase2-results")
+else:
+    OUTPUT_DIR = Path.home() / "Documents" / "roboshelf-ai-dev" / "roboshelf-results" / "phase2"
+
+MODELS_DIR = OUTPUT_DIR / "models"
+LOGS_DIR = OUTPUT_DIR / "logs"
+
+# --- Szintek ---
+LEVELS = {
+    "teszt": {
+        "total_timesteps": 100_000,
+        "n_steps": 2048,
+        "batch_size": 256,
+        "n_epochs": 10,
+        "n_envs": 4,
+        "learning_rate": 3e-4,
+        "clip_range": 0.2,
+        "description": "Gyors teszt (~5 perc)",
+    },
+    "kozepes": {
+        "total_timesteps": 2_000_000,
+        "n_steps": 2048,
+        "batch_size": 512,
+        "n_epochs": 10,
+        "n_envs": 8,
+        "learning_rate": 1e-4,
+        "clip_range": 0.15,
+        "description": "Közepes (~30 perc GPU-n)",
+    },
+    "teljes": {
+        "total_timesteps": 10_000_000,
+        "n_steps": 2048,
+        "batch_size": 1024,
+        "n_epochs": 10,
+        "n_envs": 16,
+        "learning_rate": 1e-4,
+        "clip_range": 0.15,
+        "description": "Teljes (~2-4 óra GPU-n)",
+    },
+}
+
+
+def make_retail_env(n_envs=1, seed=42):
+    """Retail nav env létrehozása VecNormalize-zel."""
+    from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv, VecNormalize
+    from stable_baselines3.common.utils import set_random_seed
+
+    # Importáljuk a retail nav env-et
+    from roboshelf_retail_nav_env import RoboshelfRetailNavEnv
+
+    def make_single(rank):
+        def _init():
+            env = RoboshelfRetailNavEnv()
+            env.reset(seed=seed + rank)
+            return env
+        return _init
+
+    set_random_seed(seed)
+    if n_envs > 1:
+        env = SubprocVecEnv([make_single(i) for i in range(n_envs)])
+    else:
+        env = DummyVecEnv([make_single(0)])
+
+    env = VecNormalize(env, norm_obs=True, norm_reward=True, clip_obs=10.0, clip_reward=10.0)
+    return env
+
+
+def make_eval_env():
+    """Eval env létrehozása."""
+    from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+    from roboshelf_retail_nav_env import RoboshelfRetailNavEnv
+
+    env = DummyVecEnv([lambda: RoboshelfRetailNavEnv()])
+    env = VecNormalize(env, norm_obs=True, norm_reward=False, training=False)
+    return env
+
+
+def train(args):
+    """Fő tanítási loop."""
+    from stable_baselines3 import PPO
+    from stable_baselines3.common.callbacks import EvalCallback, CheckpointCallback
+    import torch
+
+    cfg = LEVELS[args.level]
+    timestamp = int(time.time())
+    run_name = f"g1_retail_nav_{args.level}_{timestamp}"
+
+    print(f"\n{'='*60}")
+    print(f"  ROBOSHELF AI — Fázis 2: G1 Retail Navigáció")
+    print(f"  Szint: {args.level} ({cfg['description']})")
+    print(f"  Timesteps: {cfg['total_timesteps']:,}")
+    print(f"  Envs: {cfg['n_envs']}, Batch: {cfg['batch_size']}")
+    print(f"  Device: {'cuda' if torch.cuda.is_available() else 'cpu'}")
+    print(f"  Output: {OUTPUT_DIR}")
+    print(f"{'='*60}\n")
+
+    # Könyvtárak
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    best_dir = MODELS_DIR / "best"
+    best_dir.mkdir(exist_ok=True)
+
+    # Környezet
+    print("  Környezetek létrehozása...")
+    env = make_retail_env(n_envs=cfg["n_envs"])
+    eval_env = make_eval_env()
+
+    print(f"  ✅ {cfg['n_envs']}× RoboshelfRetailNav env kész")
+    print(f"  Obs space: {env.observation_space.shape}")
+    print(f"  Action space: {env.action_space.shape}")
+
+    # PPO modell
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    policy_kwargs = dict(net_arch=dict(pi=[256, 256], vf=[256, 256]))
+
+    model = PPO(
+        "MlpPolicy",
+        env,
+        policy_kwargs=policy_kwargs,
+        learning_rate=cfg["learning_rate"],
+        n_steps=cfg["n_steps"],
+        batch_size=cfg["batch_size"],
+        n_epochs=cfg["n_epochs"],
+        gamma=0.99,
+        gae_lambda=0.95,
+        clip_range=cfg["clip_range"],
+        ent_coef=0.001,
+        vf_coef=0.5,
+        max_grad_norm=0.5,
+        tensorboard_log=str(LOGS_DIR),
+        verbose=1,
+        seed=42,
+        device=device,
+    )
+
+    # Callbacks
+    eval_callback = EvalCallback(
+        eval_env,
+        best_model_save_path=str(best_dir),
+        log_path=str(LOGS_DIR),
+        eval_freq=max(cfg["total_timesteps"] // 20, 5000),
+        n_eval_episodes=5,
+        deterministic=True,
+    )
+
+    checkpoint_callback = CheckpointCallback(
+        save_freq=max(cfg["total_timesteps"] // 10, 10000),
+        save_path=str(MODELS_DIR / "checkpoints"),
+        name_prefix=run_name,
+    )
+
+    # Tanítás
+    print(f"\n  🚀 Tanítás indítása...\n")
+    start = time.time()
+
+    model.learn(
+        total_timesteps=cfg["total_timesteps"],
+        callback=[eval_callback, checkpoint_callback],
+        tb_log_name=run_name,
+        progress_bar=True,
+    )
+
+    elapsed = time.time() - start
+    print(f"\n  ⏱️  Tanítás befejezve: {elapsed/60:.1f} perc ({elapsed/3600:.1f} óra)")
+
+    # Mentés
+    final_model = str(MODELS_DIR / f"{run_name}_final")
+    model.save(f"{final_model}.zip")
+    env.save(f"{final_model}_vecnormalize.pkl")
+    env.save(str(best_dir / "best_model_vecnormalize.pkl"))
+    print(f"  💾 Modell: {final_model}.zip")
+    print(f"  💾 VecNormalize: {final_model}_vecnormalize.pkl")
+
+    # Kiértékelés
+    print(f"\n  📊 Kiértékelés...")
+    from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize as VN
+    from roboshelf_retail_nav_env import RoboshelfRetailNavEnv
+
+    ev = DummyVecEnv([lambda: RoboshelfRetailNavEnv()])
+    ev = VN.load(f"{final_model}_vecnormalize.pkl", ev)
+    ev.training = False
+    ev.norm_reward = False
+
+    rewards, lengths, dists = [], [], []
+    for ep in range(10):
+        obs = ev.reset()
+        done = False
+        total_reward = 0
+        steps = 0
+        while not done:
+            action, _ = model.predict(obs, deterministic=True)
+            obs, reward, done, info = ev.step(action)
+            total_reward += reward[0]
+            steps += 1
+        rewards.append(total_reward)
+        lengths.append(steps)
+        if 'dist_to_target' in info[0]:
+            dists.append(info[0]['dist_to_target'])
+        print(f"    Ep {ep+1}: reward={total_reward:.1f}, lépés={steps}, táv={dists[-1] if dists else '?':.2f}m")
+
+    print(f"\n    📈 Átlag reward: {np.mean(rewards):.1f} (±{np.std(rewards):.1f})")
+    print(f"    📏 Átlag hossz: {np.mean(lengths):.0f}")
+    if dists:
+        print(f"    📍 Átlag távolság céltól: {np.mean(dists):.2f}m (start: 3.3m)")
+
+    env.close()
+    eval_env.close()
+    ev.close()
+
+    print(f"\n  ✅ Fájlok elmentve: {OUTPUT_DIR}")
+    print(f"  Letöltés Kaggle-ből: Output fül → roboshelf-phase2-results/")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Roboshelf AI — G1 Retail Nav PPO")
+    parser.add_argument("--level", choices=list(LEVELS.keys()), default="teszt")
+    args = parser.parse_args()
+    train(args)
