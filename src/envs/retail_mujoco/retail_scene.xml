@@ -1,0 +1,30 @@
+<mujoco model="roboshelf_retail_v1">
+  <option gravity="0 0 -9.81"/>
+
+  <default>
+    <geom condim="3" friction="0.8 0.1 0.1" rgba="0.8 0.8 0.8 1"/>
+  </default>
+
+  <asset>
+  </asset>
+
+  <worldbody>
+    <!-- Padló -->
+    <geom name="floor" type="plane" size="5 5 0.1" rgba="0.9 0.9 0.9 1"/>
+
+    <!-- Egy egyszerű polc-test -->
+    <body name="shelf_A3" pos="0 1 0">
+      <geom name="shelf_A3_column" type="box" size="0.05 0.5 1.0" pos="0 0 1.0" rgba="0.7 0.7 0.7 1"/>
+
+      <geom name="shelf_A3_level1" type="box" size="0.5 0.25 0.02" pos="0 0 0.5" rgba="0.8 0.8 0.8 1"/>
+      <geom name="shelf_A3_level2" type="box" size="0.5 0.25 0.02" pos="0 0 1.0" rgba="0.8 0.8 0.8 1"/>
+      <geom name="shelf_A3_level3" type="box" size="0.5 0.25 0.02" pos="0 0 1.5" rgba="0.8 0.8 0.8 1"/>
+      <geom name="shelf_A3_level4" type="box" size="0.5 0.25 0.02" pos="0 0 2.0" rgba="0.8 0.8 0.8 1"/>
+    </body>
+
+    <!-- Egy termékdoboz a polcon -->
+    <body name="product_box_1" pos="0 1 1.05">
+      <geom name="product_box_1_geom" type="box" size="0.1 0.1 0.15" rgba="0.9 0.4 0.4 1" density="500"/>
+    </body>
+  </worldbody>
+</mujoco>
