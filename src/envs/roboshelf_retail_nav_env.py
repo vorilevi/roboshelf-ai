@@ -96,10 +96,14 @@ class RoboshelfRetailNavEnv(gym.Env):
         """Betölti a G1 + retail bolt kombinált MJCF modellt."""
         # Keressük a G1 modellt
         g1_candidates = [
-            # Kaggle / Colab — pip-pel telepített mujoco_playground
-            self._find_in_site_packages("mujoco_playground/external_deps/mujoco_menagerie/unitree_g1"),
+            # Környezeti változó — Kaggle/Colab esetén ez az elsődleges
+            os.environ.get("G1_MODEL_PATH"),
+            # Kaggle klón (manuálisan klónozott menagerie)
+            "/kaggle/working/mujoco_menagerie/unitree_g1",
             # MacBook Homebrew miniforge
             "/opt/homebrew/Caskroom/miniforge/base/lib/python3.13/site-packages/mujoco_playground/external_deps/mujoco_menagerie/unitree_g1",
+            # pip-pel telepített mujoco_playground
+            self._find_in_site_packages("mujoco_playground/external_deps/mujoco_menagerie/unitree_g1"),
             # Standalone menagerie
             self._find_in_site_packages("mujoco_menagerie/unitree_g1"),
             # Lokális klón
