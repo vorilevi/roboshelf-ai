@@ -64,7 +64,7 @@ class RoboshelfRetailNavEnv(gym.Env):
         # Observation: robot qpos (29 joint + 7 freejoint) + qvel (29+6) + target rel pos (2)
         obs_size = self._get_obs_size()
         self.observation_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=(obs_size,), dtype=np.float64
+            low=-np.inf, high=np.inf, shape=(obs_size,), dtype=np.float32
         )
 
         # Action: 29 aktuátor (G1 joint position targets)
@@ -76,11 +76,11 @@ class RoboshelfRetailNavEnv(gym.Env):
         self.target_pos = np.array([0.0, 3.8])  # Raktár pozíció (x, y)
         self.start_pos = np.array([0.0, 0.5])   # Robot start (x, y)
 
-        # --- Reward súlyok ---
+        # --- Reward súlyok (G1-re kalibrálva, 55 body) ---
         self.w_forward = 2.0       # Előre haladás jutalma
         self.w_healthy = 5.0       # Egyensúly megtartása
-        self.w_ctrl = -0.01        # Kontroll költség
-        self.w_contact = -0.001    # Kontakt költség
+        self.w_ctrl = -0.001       # Kontroll költség (csökkentve: 29 aktuátor)
+        self.w_contact = -0.0001   # Kontakt költség (csökkentve: G1-nek sok testrésze van)
         self.w_goal = 100.0        # Célba érkezés bonus
 
         # --- Állapot ---
@@ -185,7 +185,7 @@ class RoboshelfRetailNavEnv(gym.Env):
             self.data.qpos.flat.copy(),
             self.data.qvel.flat.copy(),
             target_rel,
-        ])
+        ]).astype(np.float32)
         return obs
 
     def _is_healthy(self):

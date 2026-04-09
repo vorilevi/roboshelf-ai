@@ -17,6 +17,12 @@ import sys
 import time
 from pathlib import Path
 
+# --- Import útvonal fix: envs mappa elérhetővé tétele ---
+_THIS_DIR = Path(__file__).resolve().parent
+_ENVS_DIR = _THIS_DIR.parent / "envs"
+if str(_ENVS_DIR) not in sys.path:
+    sys.path.insert(0, str(_ENVS_DIR))
+
 import numpy as np
 import gymnasium as gym
 
@@ -92,11 +98,17 @@ def make_retail_env(n_envs=1, seed=42):
 
 
 def make_eval_env():
-    """Eval env létrehozása."""
+    """Eval env létrehozása.
+
+    Megjegyzés: a VecNormalize statisztikát a tanítási env-ből szinkronizáljuk
+    az EvalCallback sync_vec_normalize=True opcióval, ezért itt training=False.
+    """
     from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
     from roboshelf_retail_nav_env import RoboshelfRetailNavEnv
 
     env = DummyVecEnv([lambda: RoboshelfRetailNavEnv()])
+    # norm_reward=False: eval-nál nem normalizáljuk a rewardot (valódi értékeket látunk)
+    # training=False: a statisztika nem frissül eval közben
     env = VecNormalize(env, norm_obs=True, norm_reward=False, training=False)
     return env
 
@@ -111,12 +123,22 @@ def train(args):
     timestamp = int(time.time())
     run_name = f"g1_retail_nav_{args.level}_{timestamp}"
 
+    # Device meghatározás: CUDA > CPU
+    # MPS (Apple Silicon) szándékosan kizárva: MlpPolicy float64-et használ,
+    # amit az MPS framework nem támogat. CPU gyorsabb is MLP esetén.
+    if torch.cuda.is_available():
+        device = "cuda"
+        device_label = f"CUDA ({torch.cuda.get_device_name(0)})"
+    else:
+        device = "cpu"
+        device_label = "CPU (M2 optimalizált)"
+
     print(f"\n{'='*60}")
     print(f"  ROBOSHELF AI — Fázis 2: G1 Retail Navigáció")
     print(f"  Szint: {args.level} ({cfg['description']})")
     print(f"  Timesteps: {cfg['total_timesteps']:,}")
     print(f"  Envs: {cfg['n_envs']}, Batch: {cfg['batch_size']}")
-    print(f"  Device: {'cuda' if torch.cuda.is_available() else 'cpu'}")
+    print(f"  Device: {device_label}")
     print(f"  Output: {OUTPUT_DIR}")
     print(f"{'='*60}\n")
 
@@ -136,7 +158,6 @@ def train(args):
     print(f"  Action space: {env.action_space.shape}")
 
     # PPO modell
-    device = "cuda" if torch.cuda.is_available() else "cpu"
     policy_kwargs = dict(net_arch=dict(pi=[256, 256], vf=[256, 256]))
 
     model = PPO(
@@ -158,6 +179,27 @@ def train(args):
         seed=42,
         device=device,
     )
+
+    # VecNormalize szinkronizáló callback (train → eval stats másolás)
+    from stable_baselines3.common.callbacks import BaseCallback
+    from stable_baselines3.common.vec_env import VecNormalize
+
+    class SyncVecNormalizeCallback(BaseCallback):
+        """Eval előtt szinkronizálja a VecNormalize statisztikát train env-ből."""
+        def __init__(self, train_env, eval_env_ref):
+            super().__init__()
+            self.train_env = train_env
+            self.eval_env_ref = eval_env_ref
+
+        def _on_step(self):
+            return True
+
+        def on_eval_start(self):
+            if isinstance(self.train_env, VecNormalize) and isinstance(self.eval_env_ref, VecNormalize):
+                self.eval_env_ref.obs_rms = self.train_env.obs_rms
+                self.eval_env_ref.ret_rms = self.train_env.ret_rms
+
+    sync_cb = SyncVecNormalizeCallback(env, eval_env)
 
     # Callbacks
     eval_callback = EvalCallback(
@@ -181,7 +223,7 @@ def train(args):
 
     model.learn(
         total_timesteps=cfg["total_timesteps"],
-        callback=[eval_callback, checkpoint_callback],
+        callback=[sync_cb, eval_callback, checkpoint_callback],
         tb_log_name=run_name,
         progress_bar=True,
     )
