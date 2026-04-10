@@ -1,7 +1,7 @@
 # Roboshelf AI — Session Kontextus
 
 > Ezt a fájlt az AI olvassa, hogy gyorsan felvegye a fonalat.
-> Utoljára frissítve: 2026-04-10
+> Utoljára frissítve: 2026-04-10 (fresh start Mac tanítás indítva)
 
 ---
 
@@ -49,21 +49,26 @@ polcokat feltölteni. Végcél: befektetői demo. 5 fázis.
 
 ## Ami éppen fut
 
-**Kaggle T4 GPU** — `teljes` szint, 30M lépés, fresh start az új reward shaping-gel
-- Notebook: `notebooks/roboshelf_phase2_kaggle.ipynb`
-- Timeout fix: `KaggleFlushCb` (200 lépésenként flush, 2000 lépésenként heartbeat)
-- Eredmény: Kaggle Output → `roboshelf_phase2_results.zip` letöltés után `roboshelf-results/phase2/kaggle_teljes/`
+**MacBook M2 CPU** — `m2_3m_fresh` szint, 3M lépés, fresh start az új reward shaping-gel
+- Script: `src/training/roboshelf_phase2_train.py --level m2_3m_fresh`
+- Indítás: `cd ~/roboshelf-ai-dev/roboshelf-ai && python src/training/roboshelf_phase2_train.py --level m2_3m_fresh`
+- Becsült idő: ~2 óra (M2 CPU, 4 env, ~1000 FPS)
+- Eredmény: `roboshelf-results/phase2/models/` és `roboshelf-results/phase2/logs/`
+- Reward shaping: w_forward=4.0, w_healthy=3.0, w_fall=-10.0, w_gait=0.18 (env-ben beégetve)
+- LR: 3e-4 (fresh start → magasabb, mint fine-tune)
+
+**Kaggle T4** — leállítva (n_envs=8 hiba + GPU kihasználtság korlátai)
 
 ---
 
 ## Következő teendők (prioritás sorrendben)
 
-1. **Kaggle eredmény kiértékelése** — 30M lépéses tanítás után
-   - Ha reward >100 és ep hossz >100: Fázis 2 kész, mehet Fázis 3
-   - Ha plató: reward shaping további finomhangolás (w_gait növelése, foot clearance)
-2. **Fázis 3 tanítóscript megírása** — `src/envs/roboshelf_manipulation_env.py` már megvan,
+1. **Mac fresh start eredmény kiértékelése** — 3M lépés után
+   - Ha reward >+50 és ep hossz >50: jó alap, finetune-olható
+   - Ha plató < -50 marad: w_gait csökkenteni, w_forward növelni
+2. **GitHub push** — commitelni kell Mac terminálból: `git add -A && git commit -m "Fresh start m2_3m_fresh szint" && git push`
+3. **Fázis 3 tanítóscript megírása** — `src/envs/roboshelf_manipulation_env.py` már megvan,
    csak a `src/training/roboshelf_phase3_train.py` hiányzik
-3. **GitHub push** — commitelni kell Mac terminálból (sandbox-ban nincs git auth)
 
 ---
 
@@ -73,7 +78,7 @@ polcokat feltölteni. Végcél: befektetői demo. 5 fázis.
 src/envs/roboshelf_retail_nav_env.py       ← Fázis 2 env (survival bónusz w=0.5 hozzáadva)
 src/envs/roboshelf_manipulation_env.py     ← Fázis 3 env (vázlat, kész)
 src/envs/assets/roboshelf_retail_store.xml ← Bolt MJCF (2 gondola, termékek)
-src/training/roboshelf_phase2_train.py     ← Fázis 2 tanítás (m2_6m szint hozzáadva)
+src/training/roboshelf_phase2_train.py     ← Fázis 2 tanítás (m2_3m_fresh szint hozzáadva)
 src/training/roboshelf_phase2_finetune.py  ← Fine-tune script (evaluations.npz append-del, flush fix)
 notebooks/roboshelf_phase2_kaggle.ipynb    ← Kaggle notebook (KaggleFlushCb + SyncNormCb fix)
 src/roboshelf_phase2_check.py              ← Rendszerellenőrző
@@ -104,8 +109,9 @@ roboshelf-results/phase2/logs/             ← TensorBoard logok + evaluations.n
 | 18.2M | -81.8       | 52       | finetune 3 — plató → **fresh start Kaggle-n** |
 
 **Áttörés:** 7.8M lépésnél a reward pozitívba fordult (+42) és az ep hossz áttörte a 43 lépéses plafont (50 lépés).
-**Contact pattern bevezetése (12.2M+):** visszaesés -84-re, majd plató 52 ep hossznál. A gait reward (w=0.18) túl gyenge volt a régi modell "szokásaival" szemben → fresh start Kaggle-n szükséges.
-**Jelenlegi legjobb MacBook modell:** 10.2M lépés, reward=+51, ep hossz=51 (`roboshelf-results/phase2/models/best/best_model.zip`)
+**Contact pattern bevezetése (12.2M+):** visszaesés -84-re, majd plató 52 ep hossznál. A gait reward (w=0.18) túl gyenge volt a régi modell "szokásaival" szemben → fresh start szükséges.
+**Jelenlegi legjobb korábbi Mac modell:** 10.2M lépés, reward=+51, ep hossz=51 (`roboshelf-results/phase2/models/best/best_model.zip`)
+**Fresh start (m2_3m_fresh):** 2026-04-10-én indítva, nulláról, az új reward shaping-gel (w_forward=4.0, w_healthy=3.0, w_fall=-10.0, w_gait=0.18). A korábbi modell nincs betöltve.
 
 ---
 
@@ -120,7 +126,9 @@ roboshelf-results/phase2/logs/             ← TensorBoard logok + evaluations.n
 - Kaggle IOPub timeout fix: `KaggleFlushCb` — 200 lépésenként flush, 2000 lépésenként heartbeat, `progress_bar=False`
 - Kaggle `kozepes` futás timeout miatt csak 4M lépésig jutott (best model reward: -60.3) — nem használjuk
 - SyncNormCb: csak 10 lépésenként szinkronizál
-- Contact pattern reward: w_gait=0.18 túl gyenge volt fine-tune-ban (plató 52 ep hossznál) → fresh start-ban erősebb gradienst ad
+- Contact pattern reward: w_gait=0.18 túl gyenge volt fine-tune-ban (plató 52 ep hossznál) → fresh start-ban erősebb gradienst ad (nulláról tanulja meg egyszerre a járást és a gait timing-ot)
+- Kaggle T4 GPU: MuJoCo csak CPU-n fut → GPU teljesen kihasználatlan. SB3 MlpPolicy CPU-ra van optimalizálva (issue #1245). Multi-GPU nem támogatott SB3-ban. Következtetés: Kaggle T4x2 csomag felesleges a mi feladatunkhoz.
+- Optimális Kaggle konfig (ha újra kellene): device='cpu', n_envs=4 (= 4 CPU core), batch_size=64
 - Git commit: sandbox-ból nem lehet pusholni (nincs auth) → Mac terminálból kell: `git push`
 
 ---

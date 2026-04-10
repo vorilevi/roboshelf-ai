@@ -98,6 +98,18 @@ LEVELS = {
         "clip_range": 0.1,
         "description": "M2 CPU ~1 óra (6M lépés, 4 env)",
     },
+    "m2_3m_fresh": {
+        # M2 CPU fresh start, ~2 óra: 3M lépés, optimalizált reward shaping
+        # w_forward=4.0, w_healthy=3.0, w_fall=-10.0, w_gait=0.18 (env-ben beégetve)
+        "total_timesteps": 3_000_000,
+        "n_steps": 2048,
+        "batch_size": 256,
+        "n_epochs": 10,
+        "n_envs": 4,
+        "learning_rate": 3e-4,   # magasabb LR a fresh starthoz
+        "clip_range": 0.2,
+        "description": "M2 CPU fresh start ~2 óra (3M lépés, új reward shaping)",
+    },
 }
 
 
