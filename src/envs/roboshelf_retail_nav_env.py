@@ -77,14 +77,17 @@ class RoboshelfRetailNavEnv(gym.Env):
         self.start_pos = np.array([0.0, 0.5])   # Robot start (x, y)
 
         # --- Reward súlyok (G1-re kalibrálva, 55 body) ---
-        self.w_forward = 4.0       # Előre haladás jutalma
-        self.w_healthy = 3.0       # Egyensúly megtartása
+        # FIX: "stand and fall" probléma megoldása (legged_gym / Gymnasium Humanoid tapasztalat alapján)
+        # Gyökér ok: w_healthy=3.0 per-lépés bónusz → robot megtanul állni és elesni
+        # Megoldás: healthy szinte nullára, forward domináns, fall büntetés erős
+        self.w_forward = 5.0       # Előre haladás jutalma — domináns reward forrás
+        self.w_healthy = 0.5       # Egyensúly megtartása — minimális (3.0→0.5), ne legyen kifizetődő csak állni
         self.w_ctrl = -0.001       # Kontroll költség (csökkentve: 29 aktuátor)
         self.w_contact = -0.0001   # Kontakt költség (csökkentve: G1-nek sok testrésze van)
         self.w_goal = 100.0        # Célba érkezés bonus
-        self.w_survival = 0.0      # Survival bónusz: kikapcsolva (contact pattern váltja ki)
-        self.w_fall = -10.0        # Esés büntetés: egyszer, termináláskor
-        self.w_gait = 0.0          # Contact pattern reward — kikapcsolva! Előbb járást tanul, majd gait.
+        self.w_survival = 0.0      # Survival bónusz: kikapcsolva
+        self.w_fall = -50.0        # Esés büntetés — erős (-10→-50), komolyan kerülje az esést
+        self.w_gait = 0.0          # Contact pattern reward — kikapcsolva (curriculum: előbb járás, majd gait)
 
         # --- Gait paraméterek (ciklikus lépésminta) ---
         # 0.8s periódus = 1.25 lépés/mp, 50% offset = szimmetrikus bal-jobb váltás

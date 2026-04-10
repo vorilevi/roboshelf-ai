@@ -123,6 +123,19 @@ LEVELS = {
         "clip_range": 0.2,
         "description": "M2 CPU fresh start ~2 óra (3M lépés, gait reward kikapcsolva)",
     },
+    "m2_3m_v3": {
+        # FIX: "stand and fall" probléma megoldása
+        # w_forward=5.0 (domináns), w_healthy=0.5 (minimális), w_fall=-50.0 (erős)
+        # Forrás: legged_gym + Gymnasium Humanoid-v4 tapasztalat
+        "total_timesteps": 3_000_000,
+        "n_steps": 2048,
+        "batch_size": 256,
+        "n_epochs": 10,
+        "n_envs": 4,
+        "learning_rate": 3e-4,
+        "clip_range": 0.2,
+        "description": "M2 CPU fresh start ~2 óra (stand-and-fall fix: w_healthy=0.5, w_fall=-50)",
+    },
 }
 
 
