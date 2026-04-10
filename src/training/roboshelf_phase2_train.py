@@ -32,7 +32,13 @@ if os.path.exists("/kaggle/working"):
 elif os.path.exists("/content"):
     OUTPUT_DIR = Path("/content/roboshelf-phase2-results")
 else:
-    OUTPUT_DIR = Path.home() / "Documents" / "roboshelf-ai-dev" / "roboshelf-results" / "phase2"
+    # Repo-relatív útvonal: a script src/training/-ban van, tehát ../../roboshelf-results/phase2
+    _REPO_ROOT = _THIS_DIR.parent.parent
+    _RESULTS_DIR = _REPO_ROOT / "roboshelf-results" / "phase2"
+    if _RESULTS_DIR.exists() or (_REPO_ROOT / "roboshelf-results").exists():
+        OUTPUT_DIR = _RESULTS_DIR
+    else:
+        OUTPUT_DIR = Path.home() / "Documents" / "roboshelf-ai-dev" / "roboshelf-results" / "phase2"
 
 MODELS_DIR = OUTPUT_DIR / "models"
 LOGS_DIR = OUTPUT_DIR / "logs"
@@ -68,6 +74,29 @@ LEVELS = {
         "learning_rate": 1e-4,
         "clip_range": 0.15,
         "description": "Teljes (~2-4 óra GPU-n)",
+    },
+    "m2_2ora": {
+        # M2 CPU-ra optimalizált ~2 órás tanítás
+        # ~1000 FPS × 7200s = ~7.2M lépés reálisan, de 3M biztosan belefér
+        "total_timesteps": 3_000_000,
+        "n_steps": 2048,
+        "batch_size": 256,
+        "n_epochs": 10,
+        "n_envs": 4,          # 4 párhuzamos env, CPU-n biztonságos
+        "learning_rate": 1e-4,
+        "clip_range": 0.15,
+        "description": "M2 CPU ~2 óra (3M lépés, 4 env)",
+    },
+    "m2_6m": {
+        # M2 CPU ~1 óra: 6M lépés, 4 env
+        "total_timesteps": 6_000_000,
+        "n_steps": 2048,
+        "batch_size": 256,
+        "n_epochs": 10,
+        "n_envs": 4,
+        "learning_rate": 3e-5,   # kisebb LR a 3M-es modell folytatásához
+        "clip_range": 0.1,
+        "description": "M2 CPU ~1 óra (6M lépés, 4 env)",
     },
 }
 

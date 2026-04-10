@@ -77,11 +77,25 @@ class RoboshelfRetailNavEnv(gym.Env):
         self.start_pos = np.array([0.0, 0.5])   # Robot start (x, y)
 
         # --- Reward súlyok (G1-re kalibrálva, 55 body) ---
-        self.w_forward = 2.0       # Előre haladás jutalma
-        self.w_healthy = 5.0       # Egyensúly megtartása
+        self.w_forward = 4.0       # Előre haladás jutalma
+        self.w_healthy = 3.0       # Egyensúly megtartása
         self.w_ctrl = -0.001       # Kontroll költség (csökkentve: 29 aktuátor)
         self.w_contact = -0.0001   # Kontakt költség (csökkentve: G1-nek sok testrésze van)
         self.w_goal = 100.0        # Célba érkezés bonus
+        self.w_survival = 0.0      # Survival bónusz: kikapcsolva (contact pattern váltja ki)
+        self.w_fall = -10.0        # Esés büntetés: egyszer, termináláskor
+        self.w_gait = 0.18         # Contact pattern reward (legged_gym G1 konfig alapján)
+
+        # --- Gait paraméterek (ciklikus lépésminta) ---
+        # 0.8s periódus = 1.25 lépés/mp, 50% offset = szimmetrikus bal-jobb váltás
+        self._gait_period = 0.8    # másodperc
+        self._gait_offset = 0.5   # jobb láb fázis offsetje (50% = szimmetrikus)
+        self._stance_threshold = 0.55  # gait ciklus 55%-a stance, 45% swing
+        self._episode_time = 0.0  # epizód eltelt ideje (másodperc)
+
+        # --- Láb body indexek (betöltés után keressük meg) ---
+        self._left_foot_id = None
+        self._right_foot_id = None
 
         # --- Állapot ---
         self._healthy_z_range = (0.5, 1.5)  # G1 törzs magasság tartomány
@@ -147,6 +161,23 @@ class RoboshelfRetailNavEnv(gym.Env):
             self._torso_id = 1
 
         print(f"  ✅ Retail Nav env betöltve: {self.model.nbody} body, {self.model.nu} actuators")
+
+        # Láb body indexek megkeresése (G1: ankle_roll_link)
+        foot_candidates = [
+            ("left_ankle_roll_link",  "right_ankle_roll_link"),   # G1
+            ("left_ankle_link",       "right_ankle_link"),         # alternatív
+            ("left_foot",             "right_foot"),               # generikus
+        ]
+        for left_name, right_name in foot_candidates:
+            l = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, left_name)
+            r = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, right_name)
+            if l != -1 and r != -1:
+                self._left_foot_id = l
+                self._right_foot_id = r
+                print(f"  ✅ Láb body-k: [{l}]{left_name}, [{r}]{right_name}")
+                break
+        if self._left_foot_id is None:
+            print("  ⚠️  Láb body-k nem találhatók — contact pattern reward kikapcsolva")
 
     def _find_in_site_packages(self, subpath):
         """Keres egy útvonalat a site-packages-ben."""
@@ -224,7 +255,33 @@ class RoboshelfRetailNavEnv(gym.Env):
         if dist_to_target < 0.5:
             goal_bonus = self.w_goal
 
-        total_reward = forward_reward + healthy_reward + ctrl_cost + contact_cost + goal_bonus
+        # 6. Esés büntetés: csak termináláskor, egyszer
+        fall_penalty = self.w_fall if not self._is_healthy() else 0.0
+
+        # 7. Contact pattern reward (ciklikus gait timing)
+        # A robot bal-jobb váltakozó lépésmintát tanul, nem csak egyensúlyoz
+        gait_reward = 0.0
+        if self._left_foot_id is not None:
+            # Gait fázis kiszámítása az eltelt idő alapján
+            phase = (self._episode_time % self._gait_period) / self._gait_period
+            phase_left  = phase
+            phase_right = (phase + self._gait_offset) % 1.0
+
+            # Stance fázis: 0–55% = talaj érintés, 55–100% = swing (levegőben)
+            left_should_contact  = phase_left  < self._stance_threshold
+            right_should_contact = phase_right < self._stance_threshold
+
+            # Kontakt detekció: Z-tengely kontakt erő > 1N
+            left_contact  = self.data.cfrc_ext[self._left_foot_id,  2] > 1.0
+            right_contact = self.data.cfrc_ext[self._right_foot_id, 2] > 1.0
+
+            # XOR logika: reward ha kontakt egyezik a várt fázissal
+            left_match  = not (left_contact  ^ left_should_contact)
+            right_match = not (right_contact ^ right_should_contact)
+            gait_reward = self.w_gait * (float(left_match) + float(right_match))
+
+        total_reward = (forward_reward + healthy_reward + ctrl_cost + contact_cost
+                        + goal_bonus + fall_penalty + gait_reward)
 
         info = {
             "forward_reward": forward_reward,
@@ -232,6 +289,8 @@ class RoboshelfRetailNavEnv(gym.Env):
             "ctrl_cost": ctrl_cost,
             "contact_cost": contact_cost,
             "goal_bonus": goal_bonus,
+            "fall_penalty": fall_penalty,
+            "gait_reward": gait_reward,
             "dist_to_target": dist_to_target,
             "torso_z": self.data.body(self._torso_id).xpos[2],
             "robot_xy": robot_xy.copy(),
@@ -260,6 +319,7 @@ class RoboshelfRetailNavEnv(gym.Env):
         self._prev_dist_to_target = np.linalg.norm(
             self.target_pos - self.data.body(self._torso_id).xpos[:2]
         )
+        self._episode_time = 0.0  # Gait fázis időszámláló nullázása
 
         obs = self._get_obs()
         info = {"dist_to_target": self._prev_dist_to_target}
@@ -282,6 +342,9 @@ class RoboshelfRetailNavEnv(gym.Env):
         # Fizikai szimuláció (5 sub-step a stabilitásért)
         for _ in range(5):
             mujoco.mj_step(self.model, self.data)
+
+        # Gait időszámláló léptetése (5 sub-step × dt)
+        self._episode_time += 5 * self.model.opt.timestep
 
         # Observation
         obs = self._get_obs()
