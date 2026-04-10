@@ -110,6 +110,19 @@ LEVELS = {
         "clip_range": 0.2,
         "description": "M2 CPU fresh start ~2 óra (3M lépés, új reward shaping)",
     },
+    "m2_3m_nogait": {
+        # M2 CPU fresh start, gait reward KIKAPCSOLVA (w_gait=0.0)
+        # Tanulási sorrend: 1. járás megtanulása, 2. majd gait finom hangolás
+        # w_forward=4.0, w_healthy=3.0, w_fall=-10.0, w_gait=0.0
+        "total_timesteps": 3_000_000,
+        "n_steps": 2048,
+        "batch_size": 256,
+        "n_epochs": 10,
+        "n_envs": 4,
+        "learning_rate": 3e-4,
+        "clip_range": 0.2,
+        "description": "M2 CPU fresh start ~2 óra (3M lépés, gait reward kikapcsolva)",
+    },
 }
 
 

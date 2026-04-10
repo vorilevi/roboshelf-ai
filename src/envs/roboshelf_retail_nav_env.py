@@ -84,7 +84,7 @@ class RoboshelfRetailNavEnv(gym.Env):
         self.w_goal = 100.0        # Célba érkezés bonus
         self.w_survival = 0.0      # Survival bónusz: kikapcsolva (contact pattern váltja ki)
         self.w_fall = -10.0        # Esés büntetés: egyszer, termináláskor
-        self.w_gait = 0.18         # Contact pattern reward (legged_gym G1 konfig alapján)
+        self.w_gait = 0.0          # Contact pattern reward — kikapcsolva! Előbb járást tanul, majd gait.
 
         # --- Gait paraméterek (ciklikus lépésminta) ---
         # 0.8s periódus = 1.25 lépés/mp, 50% offset = szimmetrikus bal-jobb váltás

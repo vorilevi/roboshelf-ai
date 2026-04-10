@@ -5,6 +5,40 @@
 
 ---
 
+## Fontos: munkakörnyezet és terminal parancsok
+
+**Repo helye Mac-en:** `~/roboshelf-ai-dev/roboshelf-ai/`
+**Python környezet:** miniforge/conda, a terminálban aktiválva van (nem kell külön aktiválni)
+
+**Tanítás indítása (fresh start):**
+```bash
+cd ~/roboshelf-ai-dev/roboshelf-ai
+python src/training/roboshelf_phase2_train.py --level m2_3m_nogait
+```
+
+**Fine-tune indítása (meglévő modellből folytatás):**
+```bash
+cd ~/roboshelf-ai-dev/roboshelf-ai
+python src/training/roboshelf_phase2_finetune.py --steps 6000000 --lr 1e-4 --clip 0.15
+```
+
+**TensorBoard:**
+```bash
+cd ~/roboshelf-ai-dev/roboshelf-ai
+tensorboard --logdir roboshelf-results/phase2/logs
+# → http://localhost:6006
+```
+
+**GitHub push:**
+```bash
+cd ~/roboshelf-ai-dev/roboshelf-ai
+git add -A && git commit -m "..." && git push
+```
+
+**FONTOS:** Az AI sandbox-ból (Cowork) NEM tud git push-olni (nincs auth) — mindig Mac terminálból kell!
+
+---
+
 ## Mi ez a projekt?
 
 Humanoid robot RL tanítás: Unitree G1 robot megtanul egy kiskereskedelmi boltban
@@ -49,13 +83,12 @@ polcokat feltölteni. Végcél: befektetői demo. 5 fázis.
 
 ## Ami éppen fut
 
-**MacBook M2 CPU** — `m2_3m_fresh` szint, 3M lépés, fresh start az új reward shaping-gel
-- Script: `src/training/roboshelf_phase2_train.py --level m2_3m_fresh`
-- Indítás: `cd ~/roboshelf-ai-dev/roboshelf-ai && python src/training/roboshelf_phase2_train.py --level m2_3m_fresh`
-- Becsült idő: ~2 óra (M2 CPU, 4 env, ~1000 FPS)
-- Eredmény: `roboshelf-results/phase2/models/` és `roboshelf-results/phase2/logs/`
-- Reward shaping: w_forward=4.0, w_healthy=3.0, w_fall=-10.0, w_gait=0.18 (env-ben beégetve)
-- LR: 3e-4 (fresh start → magasabb, mint fine-tune)
+**MacBook M2 CPU** — `m2_3m_nogait` szint, 3M lépés, fresh start, gait reward KIKAPCSOLVA
+- Script: `src/training/roboshelf_phase2_train.py --level m2_3m_nogait`
+- Indítás: `cd ~/roboshelf-ai-dev/roboshelf-ai && python src/training/roboshelf_phase2_train.py --level m2_3m_nogait`
+- Becsült idő: ~2 óra (M2 CPU, 4 env, ~1600 FPS)
+- Reward shaping: w_forward=4.0, w_healthy=3.0, w_fall=-10.0, **w_gait=0.0** (kikapcsolva!)
+- LR: 3e-4
 
 **Kaggle T4** — leállítva (n_envs=8 hiba + GPU kihasználtság korlátai)
 
@@ -107,11 +140,15 @@ roboshelf-results/phase2/logs/             ← TensorBoard logok + evaluations.n
 | 14.2M | -81.4       | 52       | finetune 3 — lassú javulás |
 | 16.2M | -81.9       | 52       | finetune 3 — plató |
 | 18.2M | -81.8       | 52       | finetune 3 — plató → **fresh start Kaggle-n** |
+| 3.0M  | -130.4      | 41       | m2_3m_fresh (w_gait=0.18) — gait zavarja a korai tanulást |
+| 7.8M  | -113.3      | 43       | m2_3m_fresh finetune (+6M) — 43 ep hossznál plató, gait kikapcsolva |
 
 **Áttörés:** 7.8M lépésnél a reward pozitívba fordult (+42) és az ep hossz áttörte a 43 lépéses plafont (50 lépés).
 **Contact pattern bevezetése (12.2M+):** visszaesés -84-re, majd plató 52 ep hossznál. A gait reward (w=0.18) túl gyenge volt a régi modell "szokásaival" szemben → fresh start szükséges.
 **Jelenlegi legjobb korábbi Mac modell:** 10.2M lépés, reward=+51, ep hossz=51 (`roboshelf-results/phase2/models/best/best_model.zip`)
-**Fresh start (m2_3m_fresh):** 2026-04-10-én indítva, nulláról, az új reward shaping-gel (w_forward=4.0, w_healthy=3.0, w_fall=-10.0, w_gait=0.18). A korábbi modell nincs betöltve.
+**Fresh start (m2_3m_fresh, w_gait=0.18):** 2026-04-10-én indítva. 3M+6M lépés, de 43 ep hossznál megragadt. A gait reward konfliktusban volt a korai járásminta kialakításával.
+**Tanulság:** Gait reward-ot csak akkor szabad bevezetni, ha a robot már tud járni (reward > 0, ep hossz > 100). Curriculum megközelítés szükséges.
+**Következő fresh start (m2_3m_nogait, w_gait=0.0):** Gait kikapcsolva. Ha 3M után reward > -50, finetune-olni és csak akkor bevezetni a gait reward-ot.
 
 ---
 
