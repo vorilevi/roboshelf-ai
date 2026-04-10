@@ -147,9 +147,15 @@ class RoboshelfRetailNavEnv(gym.Env):
   <include file="{store_xml}"/>
 </mujoco>"""
 
-        self._combined_xml_path = os.path.join(g1_dir, "_roboshelf_nav_tmp.xml")
-        with open(self._combined_xml_path, "w") as f:
-            f.write(combined_xml)
+        # Process-specifikus temp fájlnév: elkerüli a párhuzamos env-ek konfliktusát
+        import tempfile
+        tmp = tempfile.NamedTemporaryFile(
+            mode='w', suffix='.xml', dir=g1_dir,
+            prefix='_roboshelf_nav_', delete=False
+        )
+        tmp.write(combined_xml)
+        tmp.close()
+        self._combined_xml_path = tmp.name
 
         self.model = mujoco.MjModel.from_xml_path(self._combined_xml_path)
         self.data = mujoco.MjData(self.model)
