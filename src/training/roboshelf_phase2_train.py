@@ -225,6 +225,19 @@ LEVELS = {
         "clip_range": 0.15,
         "description": "M2 CPU ~30 perc (v9: tracking_reward, w_healthy=0.05, batch=512)",
     },
+    "m2_10m_v10": {
+        # v10: PONTOS Humanoid-v4 reward struktúra portolva G1-re
+        # forward=1.25×velocity, healthy=5.0 (fix), ctrl=-0.1×action², fall=0
+        # ACTION_SCALE=0.3 véd a stand-and-fall ellen (nem a healthy csökkentése)
+        "total_timesteps": 10_000_000,
+        "n_steps": 2048,
+        "batch_size": 512,
+        "n_epochs": 10,
+        "n_envs": 4,
+        "learning_rate": 3e-4,
+        "clip_range": 0.2,
+        "description": "M2 CPU ~1 óra (v10: Humanoid-v4 reward portolva G1-re, 10M lépés)",
+    },
 }
 
 

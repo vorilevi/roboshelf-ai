@@ -83,18 +83,17 @@ class RoboshelfRetailNavEnv(gym.Env):
         #   - w_healthy = 0.0 (teljesen ki! nem 0.5, hanem nulla)
         #   - w_forward az egyetlen pozitív reward forrás
         #   - w_fall mérsékelt: ne "fagyassza be" a robotot félelemből
-        # v9: tracking reward + Humanoid-v4 mintájára kalibrált súlyok
-        # forward_reward = w_forward * dot(velocity, direction_to_target)
-        # Humanoid-v4 default: forward_reward_weight=1.25, healthy_reward=5.0
-        # Mi: erős tracking, minimális healthy, mérsékelt fall penalty
-        self.w_forward = 8.0       # Célkövetés — erős, domináns reward forrás
-        self.w_healthy = 0.05      # Létezés bónusz — szinte nulla, nem jutalmaz passzív állást
-        self.w_ctrl = -0.001       # Kontroll költség
-        self.w_contact = -0.0001   # Kontakt költség
+        # v10: Humanoid-v4 reward struktúra portolva G1-re
+        # Pontosan a Humanoid-v4 default értékek: forward=1.25, healthy=5.0, ctrl=-0.1, fall=0
+        # Kulcs különbség: ctrl cost az AKCIÓRA számítódik (nem a ctrl értékre), nincs fall penalty
+        self.w_forward = 1.25      # y_velocity (célirány) × 1.25 — Humanoid-v4 default
+        self.w_healthy = 5.0       # Fix per-step bonus — Humanoid-v4 default (stand-and-fall ellen: ACTION_SCALE=0.3 véd)
+        self.w_ctrl = -0.1         # Kontroll költség az AKCIÓRA (action²) — Humanoid-v4 default
+        self.w_contact = -0.0001   # Kontakt költség — marad
         self.w_goal = 100.0        # Célba érkezés bonus
         self.w_survival = 0.0      # Kikapcsolva
-        self.w_fall = -20.0        # Mérsékelt esés büntetés
-        self.w_gait = 0.0          # Kikapcsolva (curriculum: előbb járás stabilan, majd gait)
+        self.w_fall = 0.0          # Nincs fall penalty — Humanoid-v4-ben sincs, a healthy kiesése elég
+        self.w_gait = 0.0          # Kikapcsolva (curriculum)
 
         # --- Gait paraméterek (ciklikus lépésminta) ---
         # 0.8s periódus = 1.25 lépés/mp, 50% offset = szimmetrikus bal-jobb váltás
@@ -263,8 +262,9 @@ class RoboshelfRetailNavEnv(gym.Env):
         # 2. Egyensúly jutalom
         healthy_reward = self.w_healthy if self._is_healthy() else 0.0
 
-        # 3. Kontroll költség (simább mozgás = jobb)
-        ctrl_cost = self.w_ctrl * np.sum(np.square(self.data.ctrl))
+        # 3. Kontroll költség — az AKCIÓRA számítva (Humanoid-v4 mintájára)
+        # Humanoid-v4: ctrl_cost = 0.1 * sum(action²), nem sum(ctrl²)
+        ctrl_cost = self.w_ctrl * np.sum(np.square(self._last_action))
 
         # 4. Kontakt költség (ütközések büntetése)
         contact_forces = self.data.cfrc_ext.flat.copy()
@@ -378,6 +378,7 @@ class RoboshelfRetailNavEnv(gym.Env):
             self.target_pos - self.data.body(self._torso_id).xpos[:2]
         )
         self._episode_time = 0.0  # Gait fázis időszámláló nullázása
+        self._last_action = np.zeros(self.model.nu)  # ctrl cost inicializálás
 
         obs = self._get_obs()
         info = {"dist_to_target": self._prev_dist_to_target}
@@ -388,6 +389,7 @@ class RoboshelfRetailNavEnv(gym.Env):
         """Egy szimuláció lépés végrehajtása."""
         # Akció skálázás: [-1, 1] → aktuátor tartomány
         action = np.clip(action, -1.0, 1.0)
+        self._last_action = action.copy()  # ctrl cost számításhoz (Humanoid-v4: action² alapú)
 
         # Aktuátor vezérlés beállítása
         # Az akció a keyframe default_ctrl körüli offset (nem a tartomány közepe!)
