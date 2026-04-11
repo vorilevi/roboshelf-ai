@@ -83,12 +83,12 @@ polcokat feltölteni. Végcél: befektetői demo. 5 fázis.
 
 ## Ami éppen fut
 
-**MacBook M2 CPU** — `m2_3m_v4` szint, 3M lépés, fresh start, stand-and-fall végleges fix
-- Script: `src/training/roboshelf_phase2_train.py --level m2_3m_v4`
-- Indítás: `cd ~/roboshelf-ai-dev/roboshelf-ai && python src/training/roboshelf_phase2_train.py --level m2_3m_v4`
+**MacBook M2 CPU** — `m2_3m_v5` szint, 3M lépés, fresh start, helyes G1 kezdőpozíció
+- Script: `src/training/roboshelf_phase2_train.py --level m2_3m_v5`
+- Indítás: `cd ~/roboshelf-ai-dev/roboshelf-ai && python src/training/roboshelf_phase2_train.py --level m2_3m_v5`
 - Becsült idő: ~35 perc (M2 CPU, 4 env, ~1600 FPS)
-- Reward shaping: **w_forward=5.0, w_healthy=0.0, w_fall=-20.0**, w_gait=0.0
-- LR: 3e-4
+- **Fő fix: G1 XML keyframe alapján helyes reset pozíció (z=0.79, kar joint szögek)**
+- Reward: w_forward=5.0, w_healthy=1.0, w_fall=-20.0, w_gait=0.0
 
 **Kaggle T4** — leállítva (n_envs=8 hiba + GPU kihasználtság korlátai)
 
@@ -144,6 +144,7 @@ roboshelf-results/phase2/logs/             ← TensorBoard logok + evaluations.n
 | 7.8M  | -113.3      | 43       | m2_3m_fresh finetune (+6M) — 43 ep hossznál plató, gait kikapcsolva |
 | 3.0M  | -130.4      | 41       | m2_3m_nogait — **stand-and-fall**: minden ep azonos (-135, 41 lépés, ±0) |
 | 3.0M  | -264.6      | 35       | m2_3m_v3 — w_fall=-50 túl erős → robot "befagyott" |
+| 3.0M  | -249.3      | 32       | m2_3m_v4 — w_healthy=0.0 + rossz pozíció → azonnal elesett |
 
 **Áttörés:** 7.8M lépésnél a reward pozitívba fordult (+42) és az ep hossz áttörte a 43 lépéses plafont (50 lépés).
 **Contact pattern bevezetése (12.2M+):** visszaesés -84-re, majd plató 52 ep hossznál. A gait reward (w=0.18) túl gyenge volt a régi modell "szokásaival" szemben → fresh start szükséges.
@@ -165,7 +166,8 @@ roboshelf-results/phase2/logs/             ← TensorBoard logok + evaluations.n
 - Kaggle IOPub timeout fix: `KaggleFlushCb` — 200 lépésenként flush, 2000 lépésenként heartbeat, `progress_bar=False`
 - Kaggle `kozepes` futás timeout miatt csak 4M lépésig jutott (best model reward: -60.3) — nem használjuk
 - SyncNormCb: csak 10 lépésenként szinkronizál
-- **Stand-and-fall probléma** (jól ismert RL hiba): w_healthy=3.0 per-lépés bónusz → robot megtanul állni és elesni (41 lépés × 3.0 = +123 reward, mozgás kockázatos). Fix: w_healthy=0.5, w_fall=-50.0, w_forward=5.0 (domináns). Forrás: legged_gym + Gymnasium Humanoid-v4 közösségi tapasztalat.
+- **Stand-and-fall probléma** (jól ismert RL hiba): w_healthy=3.0 per-lépés bónusz → robot megtanul állni és elesni. Fix: w_healthy=1.0 (mérsékelt), w_forward=5.0 (domináns), w_fall=-20.
+- **G1 kezdőpozíció hiba (KRITIKUS)**: reset-kor z=0.75 + karok nulla szögben → fizikailag instabil, azonnal elesett. Fix: G1 XML keyframe ("stand") alapján z=0.79, kar joint szögek: bal=[0.2, 0.2, 0, 1.28, 0, 0, 0], jobb=[0.2, -0.2, 0, 1.28, 0, 0, 0]. A kar tömege megdönti a robotot ha rossz pozícióban van!
 - Contact pattern reward: w_gait=0.18 túl gyenge volt fine-tune-ban (plató 52 ep hossznál) → fresh start-ban erősebb gradienst ad (nulláról tanulja meg egyszerre a járást és a gait timing-ot)
 - Kaggle T4 GPU: MuJoCo csak CPU-n fut → GPU teljesen kihasználatlan. SB3 MlpPolicy CPU-ra van optimalizálva (issue #1245). Multi-GPU nem támogatott SB3-ban. Következtetés: Kaggle T4x2 csomag felesleges a mi feladatunkhoz.
 - Optimális Kaggle konfig (ha újra kellene): device='cpu', n_envs=4 (= 4 CPU core), batch_size=64

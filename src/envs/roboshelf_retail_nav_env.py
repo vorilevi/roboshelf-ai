@@ -83,14 +83,17 @@ class RoboshelfRetailNavEnv(gym.Env):
         #   - w_healthy = 0.0 (teljesen ki! nem 0.5, hanem nulla)
         #   - w_forward az egyetlen pozitív reward forrás
         #   - w_fall mérsékelt: ne "fagyassza be" a robotot félelemből
-        self.w_forward = 5.0       # Előre haladás — EGYETLEN pozitív reward forrás
-        self.w_healthy = 0.0       # Teljesen kikapcsolva (0.5→0.0): passzív állás nem jutalmazott
-        self.w_ctrl = -0.001       # Kontroll költség (csökkentve: 29 aktuátor)
-        self.w_contact = -0.0001   # Kontakt költség (csökkentve: G1-nek sok testrésze van)
+        # FIX v5: helyes G1 kezdőpozíció (z=0.79, kar joint szögek) + újrakalibrált reward
+        # A korábbi instabilitás oka: z=0.75 + karok rossz pozícióban → azonnal elesett
+        # Most hogy a robot stabilan indul, visszaállítjuk a mérsékelt healthy reward-ot
+        self.w_forward = 5.0       # Előre haladás — domináns reward forrás
+        self.w_healthy = 1.0       # Mérsékelt alive bonus (0.0 túl sparse volt, 3.0 stand-and-fall)
+        self.w_ctrl = -0.001       # Kontroll költség
+        self.w_contact = -0.0001   # Kontakt költség
         self.w_goal = 100.0        # Célba érkezés bonus
-        self.w_survival = 0.0      # Survival bónusz: kikapcsolva
-        self.w_fall = -20.0        # Esés büntetés — mérsékelt (-50→-20), ne fagyassza be a mozgást
-        self.w_gait = 0.0          # Contact pattern reward — kikapcsolva (curriculum: előbb járás, majd gait)
+        self.w_survival = 0.0      # Kikapcsolva
+        self.w_fall = -20.0        # Mérsékelt esés büntetés
+        self.w_gait = 0.0          # Kikapcsolva (curriculum: előbb járás, majd gait)
 
         # --- Gait paraméterek (ciklikus lépésminta) ---
         # 0.8s periódus = 1.25 lépés/mp, 50% offset = szimmetrikus bal-jobb váltás
@@ -316,14 +319,33 @@ class RoboshelfRetailNavEnv(gym.Env):
 
         mujoco.mj_resetData(self.model, self.data)
 
-        # G1 kezdő pozíció beállítása (robot_start site: x=0, y=0.5)
-        # A freejoint qpos: [x, y, z, qw, qx, qy, qz]
+        # G1 kezdő pozíció beállítása — a G1 XML "stand" keyframe alapján!
+        # Forrás: mujoco_menagerie/unitree_g1/g1.xml <keyframe name="stand">
+        # freejoint: [x, y, z, qw, qx, qy, qz]
         if self.model.nq > 7:
             self.data.qpos[0] = 0.0    # x
             self.data.qpos[1] = 0.5    # y (bolt eleje)
-            self.data.qpos[2] = 0.75   # z (álló magasság)
-            self.data.qpos[3] = 1.0    # qw (egyenesen áll)
+            self.data.qpos[2] = 0.79   # z — 0.79! (nem 0.75, az instabil volt)
+            self.data.qpos[3] = 1.0    # qw
             self.data.qpos[4:7] = 0.0  # qx, qy, qz
+            # Lábak: mind nulla (G1 egyenesen áll, nem hajlított térdekkel)
+            self.data.qpos[7:19] = 0.0
+            # Derék: nulla
+            self.data.qpos[19:22] = 0.0
+            # Bal kar: keyframe értékek (0.2 0.2 0 1.28 0 0 0)
+            # Fontos: kar tömege megdönti a robotot ha nem a helyes pozícióban van!
+            if self.model.nq >= 36:
+                self.data.qpos[22] = 0.2
+                self.data.qpos[23] = 0.2
+                self.data.qpos[24] = 0.0
+                self.data.qpos[25] = 1.28
+                self.data.qpos[26:29] = 0.0
+                # Jobb kar: (0.2 -0.2 0 1.28 0 0 0)
+                self.data.qpos[29] = 0.2
+                self.data.qpos[30] = -0.2
+                self.data.qpos[31] = 0.0
+                self.data.qpos[32] = 1.28
+                self.data.qpos[33:36] = 0.0
 
         # Forward kinematics
         mujoco.mj_forward(self.model, self.data)

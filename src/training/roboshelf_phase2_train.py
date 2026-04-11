@@ -149,6 +149,19 @@ LEVELS = {
         "clip_range": 0.2,
         "description": "M2 CPU fresh start ~35 perc (v4: w_healthy=0.0, w_fall=-20, w_forward=5.0)",
     },
+    "m2_3m_v5": {
+        # FIX v5: helyes G1 kezdőpozíció! z=0.79 + kar joint szögek a keyframe alapján
+        # Ez volt az igazi probléma: z=0.75 + karok rossz pozícióban → azonnal instabil
+        # Reward: w_healthy=1.0 (mérsékelt), w_forward=5.0 (domináns), w_fall=-20
+        "total_timesteps": 3_000_000,
+        "n_steps": 2048,
+        "batch_size": 256,
+        "n_epochs": 10,
+        "n_envs": 4,
+        "learning_rate": 3e-4,
+        "clip_range": 0.2,
+        "description": "M2 CPU fresh start ~35 perc (v5: helyes G1 keyframe pozíció!)",
+    },
 }
 
 
