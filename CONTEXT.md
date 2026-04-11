@@ -83,11 +83,11 @@ polcokat feltölteni. Végcél: befektetői demo. 5 fázis.
 
 ## Ami éppen fut
 
-**MacBook M2 CPU** — `m2_3m_v3` szint, 3M lépés, fresh start, stand-and-fall fix
-- Script: `src/training/roboshelf_phase2_train.py --level m2_3m_v3`
-- Indítás: `cd ~/roboshelf-ai-dev/roboshelf-ai && python src/training/roboshelf_phase2_train.py --level m2_3m_v3`
+**MacBook M2 CPU** — `m2_3m_v4` szint, 3M lépés, fresh start, stand-and-fall végleges fix
+- Script: `src/training/roboshelf_phase2_train.py --level m2_3m_v4`
+- Indítás: `cd ~/roboshelf-ai-dev/roboshelf-ai && python src/training/roboshelf_phase2_train.py --level m2_3m_v4`
 - Becsült idő: ~35 perc (M2 CPU, 4 env, ~1600 FPS)
-- Reward shaping: **w_forward=5.0, w_healthy=0.5, w_fall=-50.0**, w_gait=0.0
+- Reward shaping: **w_forward=5.0, w_healthy=0.0, w_fall=-20.0**, w_gait=0.0
 - LR: 3e-4
 
 **Kaggle T4** — leállítva (n_envs=8 hiba + GPU kihasználtság korlátai)
@@ -143,6 +143,7 @@ roboshelf-results/phase2/logs/             ← TensorBoard logok + evaluations.n
 | 3.0M  | -130.4      | 41       | m2_3m_fresh (w_gait=0.18) — gait zavarja a korai tanulást |
 | 7.8M  | -113.3      | 43       | m2_3m_fresh finetune (+6M) — 43 ep hossznál plató, gait kikapcsolva |
 | 3.0M  | -130.4      | 41       | m2_3m_nogait — **stand-and-fall**: minden ep azonos (-135, 41 lépés, ±0) |
+| 3.0M  | -264.6      | 35       | m2_3m_v3 — w_fall=-50 túl erős → robot "befagyott" |
 
 **Áttörés:** 7.8M lépésnél a reward pozitívba fordult (+42) és az ep hossz áttörte a 43 lépéses plafont (50 lépés).
 **Contact pattern bevezetése (12.2M+):** visszaesés -84-re, majd plató 52 ep hossznál. A gait reward (w=0.18) túl gyenge volt a régi modell "szokásaival" szemben → fresh start szükséges.

@@ -136,6 +136,19 @@ LEVELS = {
         "clip_range": 0.2,
         "description": "M2 CPU fresh start ~2 óra (stand-and-fall fix: w_healthy=0.5, w_fall=-50)",
     },
+    "m2_3m_v4": {
+        # FIX v4: w_healthy=0.0 (teljesen ki!), w_fall=-20 (mérsékelt), w_forward=5.0
+        # v3 tanulság: w_fall=-50 túl agresszív → robot "befagyott" (ep hossz 35, reward -264)
+        # v4: healthy nullán, fall mérsékelt → forward az egyetlen pozitív forrás
+        "total_timesteps": 3_000_000,
+        "n_steps": 2048,
+        "batch_size": 256,
+        "n_epochs": 10,
+        "n_envs": 4,
+        "learning_rate": 3e-4,
+        "clip_range": 0.2,
+        "description": "M2 CPU fresh start ~35 perc (v4: w_healthy=0.0, w_fall=-20, w_forward=5.0)",
+    },
 }
 
 
