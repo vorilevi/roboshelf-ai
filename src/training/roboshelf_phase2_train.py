@@ -189,6 +189,30 @@ LEVELS = {
         "clip_range": 0.2,
         "description": "M2 CPU fresh start ~35 perc (v7: sub-step 5→2, stabil egyensúly)",
     },
+    "m2_3m_v8": {
+        # FIX v8: akció skála csökkentve (ACTION_SCALE=0.3 radian)
+        # v7 tanulság: policy előre dőlt → 67 lépésnél terminál
+        # Teljes ctrl_half helyett max ±0.3 radian eltérés az egyensúlytól → stabilabb mozgás
+        "total_timesteps": 3_000_000,
+        "n_steps": 2048,
+        "batch_size": 256,
+        "n_epochs": 10,
+        "n_envs": 4,
+        "learning_rate": 3e-4,
+        "clip_range": 0.2,
+        "description": "M2 CPU fresh start ~17 perc (v8: ACTION_SCALE=0.3, kisebb perturbáció)",
+    },
+    "m2_10m_v8": {
+        # 10M lépés, egyébként ugyanaz mint v8
+        "total_timesteps": 10_000_000,
+        "n_steps": 2048,
+        "batch_size": 256,
+        "n_epochs": 10,
+        "n_envs": 4,
+        "learning_rate": 3e-4,
+        "clip_range": 0.2,
+        "description": "M2 CPU ~1 óra (10M lépés, v8 konfig: ACTION_SCALE=0.3)",
+    },
 }
 
 

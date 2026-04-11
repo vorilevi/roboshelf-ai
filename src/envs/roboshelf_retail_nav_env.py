@@ -389,9 +389,10 @@ class RoboshelfRetailNavEnv(gym.Env):
         # Ezzel nulla akció = egyensúlyi pozíció, nem random ctrl_mean
         if self.model.nu > 0:
             ctrl_range = self.model.actuator_ctrlrange
-            ctrl_half = (ctrl_range[:, 1] - ctrl_range[:, 0]) / 2
-            # default_ctrl + action * ctrl_half, clamp a tartományra
-            raw_ctrl = self._default_ctrl + action * ctrl_half
+            # Akció skála: 0.3 radian max eltérés az egyensúlyi pozíciótól
+            # Teljes tartomány helyett kis perturbációk → stabilabb tanulás
+            ACTION_SCALE = 0.3
+            raw_ctrl = self._default_ctrl + action * ACTION_SCALE
             self.data.ctrl[:] = np.clip(raw_ctrl, ctrl_range[:, 0], ctrl_range[:, 1])
 
         # Fizikai szimuláció (2 sub-step — csökkentve 5-ről)

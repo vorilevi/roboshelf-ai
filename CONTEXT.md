@@ -83,11 +83,11 @@ polcokat feltölteni. Végcél: befektetői demo. 5 fázis.
 
 ## Ami éppen fut
 
-**MacBook M2 CPU** — `m2_3m_v7` szint, 3M lépés, fresh start, sub-step 5→2
-- Script: `src/training/roboshelf_phase2_train.py --level m2_3m_v7`
-- Indítás: `cd ~/roboshelf-ai-dev/roboshelf-ai && python src/training/roboshelf_phase2_train.py --level m2_3m_v7`
-- Becsült idő: ~35 perc (M2 CPU, 4 env, ~1600 FPS)
-- **Fő fix: sub-step 5→2, robot 100+ lépésen át stabil nulla akcióval ✅**
+**MacBook M2 CPU** — `m2_10m_v8` szint, 10M lépés, ACTION_SCALE=0.3
+- Script: `src/training/roboshelf_phase2_train.py --level m2_10m_v8`
+- Indítás: `cd ~/roboshelf-ai-dev/roboshelf-ai && python src/training/roboshelf_phase2_train.py --level m2_10m_v8`
+- Becsült idő: ~1 óra (M2 CPU, 4 env, ~2900 FPS)
+- **Fő fix: ACTION_SCALE=0.3 — max ±0.3 radian eltérés az egyensúlytól**
 - Reward: w_forward=5.0, w_healthy=1.0, w_fall=-20.0, w_gait=0.0
 
 **Kaggle T4** — leállítva (n_envs=8 hiba + GPU kihasználtság korlátai)
@@ -147,6 +147,7 @@ roboshelf-results/phase2/logs/             ← TensorBoard logok + evaluations.n
 | 3.0M  | -249.3      | 32       | m2_3m_v4 — w_healthy=0.0 + rossz pozíció → azonnal elesett |
 | 3.0M  | -4.12       | 28-30    | m2_3m_v5 — helyes z=0.79, de ctrl skálázás hibás → süllyed |
 | 3.0M  | -2.50       | 30       | m2_3m_v6 — akció fix OK, de 5 sub-step túl gyors → 30 lépésnél süllyed |
+| 3.0M  | -264.6      | 67       | m2_3m_v7 — sub-step 2, stabil alap, de policy előre dől → 67 lépésnél terminál |
 
 **Áttörés:** 7.8M lépésnél a reward pozitívba fordult (+42) és az ep hossz áttörte a 43 lépéses plafont (50 lépés).
 **Contact pattern bevezetése (12.2M+):** visszaesés -84-re, majd plató 52 ep hossznál. A gait reward (w=0.18) túl gyenge volt a régi modell "szokásaival" szemben → fresh start szükséges.
