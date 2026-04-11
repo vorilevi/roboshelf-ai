@@ -347,6 +347,25 @@ class RoboshelfRetailNavEnv(gym.Env):
                 self.data.qpos[32] = 1.28
                 self.data.qpos[33:36] = 0.0
 
+        # ctrl alapértékek beállítása a keyframe alapján
+        # Position control: ctrl = célpozíció. Nulla ctrl ≠ egyensúly!
+        # A G1 keyframe ctrl értékei tartják fenn az egyensúlyi pozíciót.
+        self._default_ctrl = np.zeros(self.model.nu)
+        # Lábak (12 aktuátor, index 0-11): nulla
+        # Derék (3 aktuátor, index 12-14): nulla
+        # Bal kar (7 aktuátor, index 15-21): [0.2, 0.2, 0, 1.28, 0, 0, 0]
+        # Jobb kar (7 aktuátor, index 22-28): [0.2, -0.2, 0, 1.28, 0, 0, 0]
+        if self.model.nu >= 29:
+            self._default_ctrl[15] = 0.2
+            self._default_ctrl[16] = 0.2
+            self._default_ctrl[17] = 0.0
+            self._default_ctrl[18] = 1.28
+            self._default_ctrl[22] = 0.2
+            self._default_ctrl[23] = -0.2
+            self._default_ctrl[24] = 0.0
+            self._default_ctrl[25] = 1.28
+        self.data.ctrl[:] = self._default_ctrl.copy()
+
         # Forward kinematics
         mujoco.mj_forward(self.model, self.data)
 
@@ -366,12 +385,14 @@ class RoboshelfRetailNavEnv(gym.Env):
         action = np.clip(action, -1.0, 1.0)
 
         # Aktuátor vezérlés beállítása
+        # Az akció a keyframe default_ctrl körüli offset (nem a tartomány közepe!)
+        # Ezzel nulla akció = egyensúlyi pozíció, nem random ctrl_mean
         if self.model.nu > 0:
-            # Skálázás a ctrlrange-hez
             ctrl_range = self.model.actuator_ctrlrange
-            ctrl_mean = (ctrl_range[:, 0] + ctrl_range[:, 1]) / 2
             ctrl_half = (ctrl_range[:, 1] - ctrl_range[:, 0]) / 2
-            self.data.ctrl[:] = ctrl_mean + action * ctrl_half
+            # default_ctrl + action * ctrl_half, clamp a tartományra
+            raw_ctrl = self._default_ctrl + action * ctrl_half
+            self.data.ctrl[:] = np.clip(raw_ctrl, ctrl_range[:, 0], ctrl_range[:, 1])
 
         # Fizikai szimuláció (5 sub-step a stabilitásért)
         for _ in range(5):

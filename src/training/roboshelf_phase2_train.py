@@ -162,6 +162,20 @@ LEVELS = {
         "clip_range": 0.2,
         "description": "M2 CPU fresh start ~35 perc (v5: helyes G1 keyframe pozíció!)",
     },
+    "m2_3m_v6": {
+        # FIX v6: akció skálázás javítva!
+        # Korábban: ctrl = ctrl_mean + action * ctrl_half (ctrl_mean rossz alap!)
+        # Most: ctrl = default_ctrl + action * ctrl_half (keyframe az alap)
+        # Nulla akció = egyensúlyi pozíció, nem random ctrl_mean
+        "total_timesteps": 3_000_000,
+        "n_steps": 2048,
+        "batch_size": 256,
+        "n_epochs": 10,
+        "n_envs": 4,
+        "learning_rate": 3e-4,
+        "clip_range": 0.2,
+        "description": "M2 CPU fresh start ~35 perc (v6: keyframe-alapú akció skálázás)",
+    },
 }
 
 
