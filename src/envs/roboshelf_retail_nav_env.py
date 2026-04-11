@@ -394,12 +394,13 @@ class RoboshelfRetailNavEnv(gym.Env):
             raw_ctrl = self._default_ctrl + action * ctrl_half
             self.data.ctrl[:] = np.clip(raw_ctrl, ctrl_range[:, 0], ctrl_range[:, 1])
 
-        # Fizikai szimuláció (5 sub-step a stabilitásért)
-        for _ in range(5):
+        # Fizikai szimuláció (2 sub-step — csökkentve 5-ről)
+        # Kevesebb sub-step = lassabb fizika = robot tovább marad talpon = több tanulási jel
+        for _ in range(2):
             mujoco.mj_step(self.model, self.data)
 
-        # Gait időszámláló léptetése (5 sub-step × dt)
-        self._episode_time += 5 * self.model.opt.timestep
+        # Gait időszámláló léptetése
+        self._episode_time += 2 * self.model.opt.timestep
 
         # Observation
         obs = self._get_obs()

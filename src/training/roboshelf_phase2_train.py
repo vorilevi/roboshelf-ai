@@ -176,6 +176,19 @@ LEVELS = {
         "clip_range": 0.2,
         "description": "M2 CPU fresh start ~35 perc (v6: keyframe-alapú akció skálázás)",
     },
+    "m2_3m_v7": {
+        # FIX v7: sub-step 5→2, robot 100+ lépésen át stabil nulla akcióval
+        # v6 tanulság: robot előre dőlt és 30 lépés alatt összecsuszik (5 sub-step túl gyors)
+        # Most: 2 sub-step = lassabb fizika = több tanulási lehetőség
+        "total_timesteps": 3_000_000,
+        "n_steps": 2048,
+        "batch_size": 256,
+        "n_epochs": 10,
+        "n_envs": 4,
+        "learning_rate": 3e-4,
+        "clip_range": 0.2,
+        "description": "M2 CPU fresh start ~35 perc (v7: sub-step 5→2, stabil egyensúly)",
+    },
 }
 
 
