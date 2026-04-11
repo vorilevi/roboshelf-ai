@@ -213,6 +213,18 @@ LEVELS = {
         "clip_range": 0.2,
         "description": "M2 CPU ~1 óra (10M lépés, v8 konfig: ACTION_SCALE=0.3)",
     },
+    "m2_5m_v9": {
+        # v9: tracking reward (sebesség × célirány), w_healthy=0.05, w_forward=8.0
+        # Humanoid-v4 mintájára: sebesség-alapú forward reward folyamatos gradienst ad
+        "total_timesteps": 5_000_000,
+        "n_steps": 2048,
+        "batch_size": 512,
+        "n_epochs": 10,
+        "n_envs": 4,
+        "learning_rate": 1e-4,
+        "clip_range": 0.15,
+        "description": "M2 CPU ~30 perc (v9: tracking_reward, w_healthy=0.05, batch=512)",
+    },
 }
 
 

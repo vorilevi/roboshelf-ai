@@ -83,17 +83,18 @@ class RoboshelfRetailNavEnv(gym.Env):
         #   - w_healthy = 0.0 (teljesen ki! nem 0.5, hanem nulla)
         #   - w_forward az egyetlen pozitív reward forrás
         #   - w_fall mérsékelt: ne "fagyassza be" a robotot félelemből
-        # FIX v5: helyes G1 kezdőpozíció (z=0.79, kar joint szögek) + újrakalibrált reward
-        # A korábbi instabilitás oka: z=0.75 + karok rossz pozícióban → azonnal elesett
-        # Most hogy a robot stabilan indul, visszaállítjuk a mérsékelt healthy reward-ot
-        self.w_forward = 5.0       # Előre haladás — domináns reward forrás
-        self.w_healthy = 1.0       # Mérsékelt alive bonus (0.0 túl sparse volt, 3.0 stand-and-fall)
+        # v9: tracking reward + Humanoid-v4 mintájára kalibrált súlyok
+        # forward_reward = w_forward * dot(velocity, direction_to_target)
+        # Humanoid-v4 default: forward_reward_weight=1.25, healthy_reward=5.0
+        # Mi: erős tracking, minimális healthy, mérsékelt fall penalty
+        self.w_forward = 8.0       # Célkövetés — erős, domináns reward forrás
+        self.w_healthy = 0.05      # Létezés bónusz — szinte nulla, nem jutalmaz passzív állást
         self.w_ctrl = -0.001       # Kontroll költség
         self.w_contact = -0.0001   # Kontakt költség
         self.w_goal = 100.0        # Célba érkezés bonus
         self.w_survival = 0.0      # Kikapcsolva
         self.w_fall = -20.0        # Mérsékelt esés büntetés
-        self.w_gait = 0.0          # Kikapcsolva (curriculum: előbb járás, majd gait)
+        self.w_gait = 0.0          # Kikapcsolva (curriculum: előbb járás stabilan, majd gait)
 
         # --- Gait paraméterek (ciklikus lépésminta) ---
         # 0.8s periódus = 1.25 lépés/mp, 50% offset = szimmetrikus bal-jobb váltás
@@ -248,11 +249,15 @@ class RoboshelfRetailNavEnv(gym.Env):
         robot_xy = self.data.body(self._torso_id).xpos[:2]
         dist_to_target = np.linalg.norm(self.target_pos - robot_xy)
 
-        # 1. Előre haladás jutalom (a célhoz közeledés)
-        if self._prev_dist_to_target is not None:
-            forward_reward = (self._prev_dist_to_target - dist_to_target) * self.w_forward
-        else:
-            forward_reward = 0.0
+        # 1. Célkövetés reward — sebesség × irány (Humanoid-v4 mintájára, de célirány-alapú)
+        # A robot sebességének a cél irányába eső komponensét jutalmazzuk
+        # Ez jobb mint y_velocity, mert a robot nem mindig y-irányban kell haladjon
+        direction_to_target = self.target_pos - robot_xy
+        dist_norm = np.linalg.norm(direction_to_target) + 1e-6
+        direction_to_target = direction_to_target / dist_norm  # unit vector
+        lin_vel = self.data.body(self._torso_id).cvel[3:5]  # cvel[3,4] = lin_x, lin_y
+        forward_component = np.dot(lin_vel, direction_to_target)
+        forward_reward = self.w_forward * forward_component
         self._prev_dist_to_target = dist_to_target
 
         # 2. Egyensúly jutalom
