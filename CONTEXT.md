@@ -83,11 +83,12 @@ polcokat feltölteni. Végcél: befektetői demo. 5 fázis.
 
 ## Ami éppen fut
 
-**MacBook M2 CPU** — `m2_10m_v10` szint, 10M lépés, Humanoid-v4 reward portolva
-- Script: `src/training/roboshelf_phase2_train.py --level m2_10m_v10`
-- Indítás: `cd ~/roboshelf-ai-dev/roboshelf-ai && python src/training/roboshelf_phase2_train.py --level m2_10m_v10`
+**MacBook M2 CPU** — `m2_10m_v11` szint, 10M lépés, reset zaj + tracking reward
+- Script: `src/training/roboshelf_phase2_train.py --level m2_10m_v11`
+- Indítás: `cd ~/roboshelf-ai-dev/roboshelf-ai && python src/training/roboshelf_phase2_train.py --level m2_10m_v11`
 - Becsült idő: ~1 óra (M2 CPU, 4 env, ~2900 FPS)
-- **Humanoid-v4 reward pontosan portolva: forward=1.25×velocity, healthy=5.0, ctrl=-0.1×action², fall=0**
+- **Fő fix: reset noise_scale=0.01 → policy általánosít, nem fagy be ±0 szórással**
+- Reward: w_forward=8.0 (tracking), w_healthy=0.05, w_fall=-20.0, w_gait=0.0
 - ACTION_SCALE=0.3 véd a stand-and-fall ellen
 - Humanoid-v4 baseline: 3M lépés → reward=855 ✅ (SB3 PPO működik, G1 env volt a hiba)
 

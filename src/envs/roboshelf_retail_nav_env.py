@@ -327,30 +327,33 @@ class RoboshelfRetailNavEnv(gym.Env):
         # G1 kezdő pozíció beállítása — a G1 XML "stand" keyframe alapján!
         # Forrás: mujoco_menagerie/unitree_g1/g1.xml <keyframe name="stand">
         # freejoint: [x, y, z, qw, qx, qy, qz]
+        # Reset zaj: Humanoid-v4 mintájára (reset_noise_scale=1e-2)
+        # Nélküle: determinisztikus reset → policy mindig ugyanazt csinálja (±0 szórás eval-ban)
+        noise_scale = 0.01
+        noise = self.np_random.uniform(-noise_scale, noise_scale, self.model.nq)
+
         if self.model.nq > 7:
-            self.data.qpos[0] = 0.0    # x
-            self.data.qpos[1] = 0.5    # y (bolt eleje)
-            self.data.qpos[2] = 0.79   # z — 0.79! (nem 0.75, az instabil volt)
-            self.data.qpos[3] = 1.0    # qw
-            self.data.qpos[4:7] = 0.0  # qx, qy, qz
-            # Lábak: mind nulla (G1 egyenesen áll, nem hajlított térdekkel)
-            self.data.qpos[7:19] = 0.0
-            # Derék: nulla
-            self.data.qpos[19:22] = 0.0
-            # Bal kar: keyframe értékek (0.2 0.2 0 1.28 0 0 0)
-            # Fontos: kar tömege megdönti a robotot ha nem a helyes pozícióban van!
+            self.data.qpos[0] = 0.0 + noise[0]   # x
+            self.data.qpos[1] = 0.5 + noise[1]   # y (bolt eleje)
+            self.data.qpos[2] = 0.79              # z — nem zajos, maradjon stabil magasság
+            self.data.qpos[3] = 1.0               # qw — nem zajos
+            self.data.qpos[4:7] = noise[4:7] * 0.001  # kis quaternion zaj
+            # Lábak: nulla + kis zaj
+            self.data.qpos[7:19] = noise[7:19]
+            # Derék: nulla + kis zaj
+            self.data.qpos[19:22] = noise[19:22]
+            # Karok: keyframe értékek + kis zaj
             if self.model.nq >= 36:
-                self.data.qpos[22] = 0.2
-                self.data.qpos[23] = 0.2
-                self.data.qpos[24] = 0.0
-                self.data.qpos[25] = 1.28
-                self.data.qpos[26:29] = 0.0
-                # Jobb kar: (0.2 -0.2 0 1.28 0 0 0)
-                self.data.qpos[29] = 0.2
-                self.data.qpos[30] = -0.2
-                self.data.qpos[31] = 0.0
-                self.data.qpos[32] = 1.28
-                self.data.qpos[33:36] = 0.0
+                self.data.qpos[22] = 0.2  + noise[22]
+                self.data.qpos[23] = 0.2  + noise[23]
+                self.data.qpos[24] = 0.0  + noise[24]
+                self.data.qpos[25] = 1.28 + noise[25]
+                self.data.qpos[26:29] = noise[26:29]
+                self.data.qpos[29] = 0.2  + noise[29]
+                self.data.qpos[30] = -0.2 + noise[30]
+                self.data.qpos[31] = 0.0  + noise[31]
+                self.data.qpos[32] = 1.28 + noise[32]
+                self.data.qpos[33:36] = noise[33:36]
 
         # ctrl alapértékek beállítása a keyframe alapján
         # Position control: ctrl = célpozíció. Nulla ctrl ≠ egyensúly!

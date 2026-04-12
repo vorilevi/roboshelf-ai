@@ -213,6 +213,19 @@ LEVELS = {
         "clip_range": 0.2,
         "description": "M2 CPU ~1 óra (10M lépés, v8 konfig: ACTION_SCALE=0.3)",
     },
+    "m2_10m_v11": {
+        # v11: reset zaj hozzáadva (noise_scale=0.01, Humanoid-v4 mintájára)
+        # Eddig: determinisztikus reset → ±0.0 szórás eval-ban → policy befagyott
+        # Most: kis véletlen zaj → policy tanul általánosítani → nem ragad lokális optimumba
+        "total_timesteps": 10_000_000,
+        "n_steps": 2048,
+        "batch_size": 512,
+        "n_epochs": 10,
+        "n_envs": 4,
+        "learning_rate": 1e-4,
+        "clip_range": 0.15,
+        "description": "M2 CPU ~1 óra (v11: reset noise, tracking reward, w_healthy=0.05)",
+    },
     "m2_5m_v9": {
         # v9: tracking reward (sebesség × célirány), w_healthy=0.05, w_forward=8.0
         # Humanoid-v4 mintájára: sebesség-alapú forward reward folyamatos gradienst ad
