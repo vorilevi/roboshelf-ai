@@ -76,24 +76,26 @@ class RoboshelfRetailNavEnv(gym.Env):
         self.target_pos = np.array([0.0, 3.8])  # Raktár pozíció (x, y)
         self.start_pos = np.array([0.0, 0.5])   # Robot start (x, y)
 
-        # --- Reward súlyok (G1-re kalibrálva, 55 body) ---
-        # FIX v4: "stand and fall" probléma végleges megoldása
-        # Gyökér ok: w_healthy per-lépés bónusz → passzív "állási alapjövedelem" → PPO nem tanul mozogni
-        # Megoldás (legged_gym + Gymnasium Humanoid-v4 közösségi konvenció):
-        #   - w_healthy = 0.0 (teljesen ki! nem 0.5, hanem nulla)
-        #   - w_forward az egyetlen pozitív reward forrás
-        #   - w_fall mérsékelt: ne "fagyassza be" a robotot félelemből
-        # v10: Humanoid-v4 reward struktúra portolva G1-re
-        # Pontosan a Humanoid-v4 default értékek: forward=1.25, healthy=5.0, ctrl=-0.1, fall=0
-        # Kulcs különbség: ctrl cost az AKCIÓRA számítódik (nem a ctrl értékre), nincs fall penalty
-        self.w_forward = 1.25      # y_velocity (célirány) × 1.25 — Humanoid-v4 default
-        self.w_healthy = 5.0       # Fix per-step bonus — Humanoid-v4 default (stand-and-fall ellen: ACTION_SCALE=0.3 véd)
-        self.w_ctrl = -0.1         # Kontroll költség az AKCIÓRA (action²) — Humanoid-v4 default
-        self.w_contact = -0.0001   # Kontakt költség — marad
+        # --- Reward súlyok (v12: navigation-centrikus shaping) ---
+        # v11 tanulság: tracking reward motivál mozgást, de nem garantálja a KÖZELEDÉST
+        # (robot helyben foroghat és sebesség×irány = pozitív, de nem megy előre)
+        # v12 újítások:
+        #   1. Potential-based distance shaping: (prev_dist - curr_dist) × w_dist
+        #      → minden közeledési lépés jutalmaz, távolodás büntet
+        #      → Ng et al. 1999: reward shaping, ami nem torzítja az optimális policy-t
+        #   2. Proximity bonus: ha 2.0m-en belül (start: 3.3m), lineáris extra jutalom
+        #      → rövid időablakot nem igényel, automatikusan skálázódik
+        #   3. Tracking reward marad (sebesség komponens), de kisebb súllyal
+        #   4. w_healthy=0.05 marad (v11 bevált értéken)
+        self.w_forward = 4.0       # Sebesség × célirány (tracking reward) — csökkentve 8.0→4.0
+        self.w_dist = 5.0          # Potential-based: (prev_dist - curr_dist) per step [ÚJ v12]
+        self.w_proximity = 3.0     # Proximity bonus: lineáris, 0.0m (cél) → 2.0m (küszöb) [ÚJ v12]
+        self.w_healthy = 0.05      # Minimális alive bonus (v11-ben bevált)
+        self.w_ctrl = -0.001       # Kontroll költség az AKCIÓRA (action²)
+        self.w_contact = -0.0001   # Kontakt költség
         self.w_goal = 100.0        # Célba érkezés bonus
-        self.w_survival = 0.0      # Kikapcsolva
-        self.w_fall = 0.0          # Nincs fall penalty — Humanoid-v4-ben sincs, a healthy kiesése elég
-        self.w_gait = 0.0          # Kikapcsolva (curriculum)
+        self.w_fall = -20.0        # Esés büntetés
+        self.w_gait = 0.0          # Kikapcsolva (curriculum — csak ha ep > 200 lépés stabilan)
 
         # --- Gait paraméterek (ciklikus lépésminta) ---
         # 0.8s periódus = 1.25 lépés/mp, 50% offset = szimmetrikus bal-jobb váltás
@@ -244,67 +246,78 @@ class RoboshelfRetailNavEnv(gym.Env):
         return self._healthy_z_range[0] < torso_z < self._healthy_z_range[1]
 
     def _compute_reward(self):
-        """Kiszámítja a reward-ot."""
+        """Kiszámítja a reward-ot (v12: navigation-centrikus shaping)."""
         robot_xy = self.data.body(self._torso_id).xpos[:2]
         dist_to_target = np.linalg.norm(self.target_pos - robot_xy)
 
-        # 1. Célkövetés reward — sebesség × irány (Humanoid-v4 mintájára, de célirány-alapú)
+        # 1. Sebesség-alapú tracking reward (v11-ből marad, kisebb súllyal)
         # A robot sebességének a cél irányába eső komponensét jutalmazzuk
-        # Ez jobb mint y_velocity, mert a robot nem mindig y-irányban kell haladjon
         direction_to_target = self.target_pos - robot_xy
         dist_norm = np.linalg.norm(direction_to_target) + 1e-6
-        direction_to_target = direction_to_target / dist_norm  # unit vector
+        dir_unit = direction_to_target / dist_norm  # unit vector
         lin_vel = self.data.body(self._torso_id).cvel[3:5]  # cvel[3,4] = lin_x, lin_y
-        forward_component = np.dot(lin_vel, direction_to_target)
+        forward_component = np.dot(lin_vel, dir_unit)
         forward_reward = self.w_forward * forward_component
+
+        # 2. Potential-based distance shaping (ÚJ v12)
+        # Ng et al. 1999: F(s,s') = γ·Φ(s') - Φ(s), ahol Φ(s) = -dist (közelebb = nagyobb potenciál)
+        # Egyszerűsítve: (prev_dist - curr_dist) × w_dist
+        # Garantálja: közeledés → pozitív, távolodás → negatív, reset-en nulla
+        # Nem torzítja az optimális policy-t (ellentétben a direkt dist penalty-vel)
+        dist_delta = (self._prev_dist_to_target - dist_to_target)  # pozitív ha közelebb
+        dist_shaping = self.w_dist * dist_delta
         self._prev_dist_to_target = dist_to_target
 
-        # 2. Egyensúly jutalom
+        # 3. Proximity bonus (ÚJ v12)
+        # Ha a robot 2.0m-en belül van a céltól, lineáris bonus
+        # Start: 3.3m → 0 bonus. Cél: 0m → max bonus (w_proximity × 2.0 / normalizálva)
+        # Ez rövid időablakon belüli kényszert helyettesít, de folytonos és stabil
+        PROXIMITY_THRESHOLD = 2.0  # méter, start=3.3m tehát ez a "félúton" küszöb
+        proximity_bonus = 0.0
+        if dist_to_target < PROXIMITY_THRESHOLD:
+            # Lineáris: 2.0m → 0.0, 0.0m → w_proximity
+            proximity_bonus = self.w_proximity * (PROXIMITY_THRESHOLD - dist_to_target) / PROXIMITY_THRESHOLD
+
+        # 4. Egyensúly jutalom
         healthy_reward = self.w_healthy if self._is_healthy() else 0.0
 
-        # 3. Kontroll költség — az AKCIÓRA számítva (Humanoid-v4 mintájára)
-        # Humanoid-v4: ctrl_cost = 0.1 * sum(action²), nem sum(ctrl²)
+        # 5. Kontroll költség — az AKCIÓRA számítva (action²)
         ctrl_cost = self.w_ctrl * np.sum(np.square(self._last_action))
 
-        # 4. Kontakt költség (ütközések büntetése)
+        # 6. Kontakt költség (ütközések büntetése)
         contact_forces = self.data.cfrc_ext.flat.copy()
         contact_cost = self.w_contact * np.sum(np.square(contact_forces))
 
-        # 5. Cél bonus (ha elérte a raktárt)
+        # 7. Cél bonus (ha elérte a raktárt, 0.5m-en belül)
         goal_bonus = 0.0
         if dist_to_target < 0.5:
             goal_bonus = self.w_goal
 
-        # 6. Esés büntetés: csak termináláskor, egyszer
+        # 8. Esés büntetés: csak termináláskor, egyszer
         fall_penalty = self.w_fall if not self._is_healthy() else 0.0
 
-        # 7. Contact pattern reward (ciklikus gait timing)
-        # A robot bal-jobb váltakozó lépésmintát tanul, nem csak egyensúlyoz
+        # 9. Contact pattern reward (gait timing — jelenleg kikapcsolva, curriculum-ra vár)
         gait_reward = 0.0
-        if self._left_foot_id is not None:
-            # Gait fázis kiszámítása az eltelt idő alapján
+        if self._left_foot_id is not None and self.w_gait > 0.0:
             phase = (self._episode_time % self._gait_period) / self._gait_period
             phase_left  = phase
             phase_right = (phase + self._gait_offset) % 1.0
-
-            # Stance fázis: 0–55% = talaj érintés, 55–100% = swing (levegőben)
             left_should_contact  = phase_left  < self._stance_threshold
             right_should_contact = phase_right < self._stance_threshold
-
-            # Kontakt detekció: Z-tengely kontakt erő > 1N
             left_contact  = self.data.cfrc_ext[self._left_foot_id,  2] > 1.0
             right_contact = self.data.cfrc_ext[self._right_foot_id, 2] > 1.0
-
-            # XOR logika: reward ha kontakt egyezik a várt fázissal
             left_match  = not (left_contact  ^ left_should_contact)
             right_match = not (right_contact ^ right_should_contact)
             gait_reward = self.w_gait * (float(left_match) + float(right_match))
 
-        total_reward = (forward_reward + healthy_reward + ctrl_cost + contact_cost
+        total_reward = (forward_reward + dist_shaping + proximity_bonus
+                        + healthy_reward + ctrl_cost + contact_cost
                         + goal_bonus + fall_penalty + gait_reward)
 
         info = {
             "forward_reward": forward_reward,
+            "dist_shaping": dist_shaping,
+            "proximity_bonus": proximity_bonus,
             "healthy_reward": healthy_reward,
             "ctrl_cost": ctrl_cost,
             "contact_cost": contact_cost,
@@ -312,6 +325,7 @@ class RoboshelfRetailNavEnv(gym.Env):
             "fall_penalty": fall_penalty,
             "gait_reward": gait_reward,
             "dist_to_target": dist_to_target,
+            "dist_delta": dist_delta,
             "torso_z": self.data.body(self._torso_id).xpos[2],
             "robot_xy": robot_xy.copy(),
         }

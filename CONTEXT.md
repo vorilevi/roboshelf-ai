@@ -99,12 +99,15 @@ polcokat feltölteni. Végcél: befektetői demo. 5 fázis.
    cd ~/roboshelf-ai-dev/roboshelf-ai
    git add -A && git commit -m "v11 áttörés: reset noise fix, reward=+133.6, ep=83 (20M lépés)" && git push
    ```
-2. **Tanítás folytatása** — az eval görbe még emelkedik, nem érte el a plafont:
+2. **v12 finetune indítása** — potential-based dist shaping + proximity bonus (env már frissítve):
    ```bash
    cd ~/roboshelf-ai-dev/roboshelf-ai
-   python src/training/roboshelf_phase2_finetune.py --steps 10000000 --lr 2e-5 --clip 0.1
+   python src/training/roboshelf_phase2_finetune.py --steps 10000000 --lr 3e-5 --clip 0.15
    ```
-   (Kisebb LR a finom finomhangoláshoz)
+   Vagy fresh start v12-vel (ha a finetune lassú konvergenciát mutat):
+   ```bash
+   python src/training/roboshelf_phase2_train.py --level m2_10m_v12
+   ```
 3. **Ep hossz vizsgálata** — miért terminál 83 lépésnél? Diagnosztizálni kell.
 4. **Fázis 3 tanítóscript megírása** — `src/envs/roboshelf_manipulation_env.py` már megvan,
    csak a `src/training/roboshelf_phase3_train.py` hiányzik
@@ -190,7 +193,12 @@ roboshelf-results/phase2/logs/             ← TensorBoard logok + evaluations.n
 - Git commit: sandbox-ból nem lehet pusholni (nincs auth) → Mac terminálból kell: `git push`
 - **±0.0 std determinizmus (KRITIKUS, MEGOLDVA v11-ben)**: Determinisztikus reset → policy mindig ugyanazt csinálja, eval szórás=0. Fix: reset noise_scale=0.01 (Humanoid-v4 mintájára). Ez volt a v8/v9/v10 plató gyökér oka.
 - **Tracking reward (v11+)**: `w_forward × dot(lin_vel[:2], direction_to_target)` — sebesség × célirány. Jobb mint y_velocity, mert minden irányban jutalmazza a haladást.
-- **Env reward súlyok (jelenlegi v11)**: w_forward=8.0, w_healthy=0.05, w_ctrl=-0.001, w_contact=-0.0001, w_fall=-20.0, w_gait=0.0
+- **Env reward súlyok (jelenlegi v12)**:
+  - `w_forward=4.0` (tracking: vel × dir, csökkentve 8→4)
+  - `w_dist=5.0` (potential-based: prev_dist - curr_dist, ÚJ)
+  - `w_proximity=3.0` (lineáris bonus 2.0m-en belül, ÚJ)
+  - `w_healthy=0.05, w_ctrl=-0.001, w_contact=-0.0001, w_fall=-20.0, w_gait=0.0`
+- **v11 reward súlyok**: w_forward=8.0, w_healthy=0.05, w_ctrl=-0.001, w_contact=-0.0001, w_fall=-20.0, w_gait=0.0
 
 ---
 

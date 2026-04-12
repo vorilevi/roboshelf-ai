@@ -226,6 +226,25 @@ LEVELS = {
         "clip_range": 0.15,
         "description": "M2 CPU ~1 óra (v11: reset noise, tracking reward, w_healthy=0.05)",
     },
+    "m2_10m_v12": {
+        # v12: navigation-centrikus shaping
+        # v11 tanulság: tracking reward (vel × dir) nem garantálja hogy a robot tényleg közeledik
+        # (helyben forogva is kaphat rewardot ha a "mozgás" célirányba mutat)
+        # v12 újítások:
+        #   1. Potential-based distance shaping: (prev_dist - curr_dist) × 5.0
+        #      → közeledés jutalmaz, távolodás büntet, reset-en nulla (Ng 1999)
+        #   2. Proximity bonus: 2.0m-en belül lineáris extra (max +3.0/lépés célon)
+        #   3. Tracking reward: megmarad, de kisebb súly (8.0→4.0)
+        # Eredmény előrejelzés: ep hossz >100, dist_to_target 3.3m→<2.0m 20M lépés után
+        "total_timesteps": 10_000_000,
+        "n_steps": 2048,
+        "batch_size": 512,
+        "n_epochs": 10,
+        "n_envs": 4,
+        "learning_rate": 1e-4,
+        "clip_range": 0.15,
+        "description": "M2 CPU ~1 óra (v12: potential-based dist shaping + proximity bonus)",
+    },
     "m2_5m_v9": {
         # v9: tracking reward (sebesség × célirány), w_healthy=0.05, w_forward=8.0
         # Humanoid-v4 mintájára: sebesség-alapú forward reward folyamatos gradienst ad
