@@ -1,7 +1,7 @@
 # Roboshelf AI — Session Kontextus
 
 > Ezt a fájlt az AI olvassa, hogy gyorsan felvegye a fonalat.
-> Utoljára frissítve: 2026-04-10 (fresh start Mac tanítás indítva)
+> Utoljára frissítve: 2026-04-12 (v11 áttörés + finetune: reward=+133.6, ep=83)
 
 ---
 
@@ -83,14 +83,10 @@ polcokat feltölteni. Végcél: befektetői demo. 5 fázis.
 
 ## Ami éppen fut
 
-**MacBook M2 CPU** — `m2_10m_v11` szint, 10M lépés, reset zaj + tracking reward
-- Script: `src/training/roboshelf_phase2_train.py --level m2_10m_v11`
-- Indítás: `cd ~/roboshelf-ai-dev/roboshelf-ai && python src/training/roboshelf_phase2_train.py --level m2_10m_v11`
-- Becsült idő: ~1 óra (M2 CPU, 4 env, ~2900 FPS)
-- **Fő fix: reset noise_scale=0.01 → policy általánosít, nem fagy be ±0 szórással**
-- Reward: w_forward=8.0 (tracking), w_healthy=0.05, w_fall=-20.0, w_gait=0.0
-- ACTION_SCALE=0.3 véd a stand-and-fall ellen
-- Humanoid-v4 baseline: 3M lépés → reward=855 ✅ (SB3 PPO működik, G1 env volt a hiba)
+**KÉSZ** — Legutóbbi finetune befejezve (2026-04-12):
+- `python src/training/roboshelf_phase2_finetune.py --steps 10000000 --lr 5e-5 --clip 0.1`
+- Eredmény: reward=+133.6, ±12.9 std, ep hossz=83
+- Az eval görbe még emelkedik (nem érte el a plafont)
 
 **Kaggle T4** — leállítva (n_envs=8 hiba + GPU kihasználtság korlátai)
 
@@ -98,11 +94,19 @@ polcokat feltölteni. Végcél: befektetői demo. 5 fázis.
 
 ## Következő teendők (prioritás sorrendben)
 
-1. **Mac fresh start eredmény kiértékelése** — 3M lépés után
-   - Ha reward >+50 és ep hossz >50: jó alap, finetune-olható
-   - Ha plató < -50 marad: w_gait csökkenteni, w_forward növelni
-2. **GitHub push** — commitelni kell Mac terminálból: `git add -A && git commit -m "Fresh start m2_3m_fresh szint" && git push`
-3. **Fázis 3 tanítóscript megírása** — `src/envs/roboshelf_manipulation_env.py` már megvan,
+1. **GitHub push** — commitelni kell Mac terminálból:
+   ```bash
+   cd ~/roboshelf-ai-dev/roboshelf-ai
+   git add -A && git commit -m "v11 áttörés: reset noise fix, reward=+133.6, ep=83 (20M lépés)" && git push
+   ```
+2. **Tanítás folytatása** — az eval görbe még emelkedik, nem érte el a plafont:
+   ```bash
+   cd ~/roboshelf-ai-dev/roboshelf-ai
+   python src/training/roboshelf_phase2_finetune.py --steps 10000000 --lr 2e-5 --clip 0.1
+   ```
+   (Kisebb LR a finom finomhangoláshoz)
+3. **Ep hossz vizsgálata** — miért terminál 83 lépésnél? Diagnosztizálni kell.
+4. **Fázis 3 tanítóscript megírása** — `src/envs/roboshelf_manipulation_env.py` már megvan,
    csak a `src/training/roboshelf_phase3_train.py` hiányzik
 
 ---
@@ -110,14 +114,15 @@ polcokat feltölteni. Végcél: befektetői demo. 5 fázis.
 ## Fontos fájlok
 
 ```
-src/envs/roboshelf_retail_nav_env.py       ← Fázis 2 env (survival bónusz w=0.5 hozzáadva)
+src/envs/roboshelf_retail_nav_env.py       ← Fázis 2 env (v11: reset noise, tracking reward, w_healthy=0.05)
 src/envs/roboshelf_manipulation_env.py     ← Fázis 3 env (vázlat, kész)
 src/envs/assets/roboshelf_retail_store.xml ← Bolt MJCF (2 gondola, termékek)
-src/training/roboshelf_phase2_train.py     ← Fázis 2 tanítás (m2_3m_fresh szint hozzáadva)
-src/training/roboshelf_phase2_finetune.py  ← Fine-tune script (evaluations.npz append-del, flush fix)
+src/training/roboshelf_phase2_train.py     ← Fázis 2 tanítás (m2_10m_v11 szint az utolsó)
+src/training/roboshelf_phase2_finetune.py  ← Fine-tune script (evaluations.npz append-del)
+src/training/humanoid_v4_baseline.py       ← Humanoid-v4 baseline (3M → reward=855 ✅)
 notebooks/roboshelf_phase2_kaggle.ipynb    ← Kaggle notebook (KaggleFlushCb + SyncNormCb fix)
 src/roboshelf_phase2_check.py              ← Rendszerellenőrző
-roboshelf-results/phase2/models/best/      ← Legjobb modell (7.8M lépés, reward=+42, ep=50)
+roboshelf-results/phase2/models/best/      ← Legjobb modell (20M lépés, reward=+133.6, ep=83)
 roboshelf-results/phase2/logs/             ← TensorBoard logok + evaluations.npz (teljes história)
 ```
 
@@ -150,13 +155,17 @@ roboshelf-results/phase2/logs/             ← TensorBoard logok + evaluations.n
 | 3.0M  | -4.12       | 28-30    | m2_3m_v5 — helyes z=0.79, de ctrl skálázás hibás → süllyed |
 | 3.0M  | -2.50       | 30       | m2_3m_v6 — akció fix OK, de 5 sub-step túl gyors → 30 lépésnél süllyed |
 | 3.0M  | -264.6      | 67       | m2_3m_v7 — sub-step 2, stabil alap, de policy előre dől → 67 lépésnél terminál |
+| 3.0M  | -130.4      | 79       | m2_3m_v8 — ACTION_SCALE=0.3, ±0.0 std (determinisztikus reset még!) |
+| 3.0M  | -2.50       | 79       | m2_5m_v9 — tracking reward, w_healthy=0.05, ±0.0 std (még mindig!) |
+| 10.0M | +78.7       | 79       | m2_10m_v11 — **ÁTTÖRÉS: reset noise_scale=0.01! ±29.4 std!** |
+| 20.0M | +133.6      | 83       | finetune 10M (lr=5e-5, clip=0.1) — eval görbe még emelkedik |
 
-**Áttörés:** 7.8M lépésnél a reward pozitívba fordult (+42) és az ep hossz áttörte a 43 lépéses plafont (50 lépés).
+**KRITIKUS ÁTTÖRÉS (v11):** A reset noise_scale=0.01 bevezetése törte át a determinisztikus ±0.0 std falat. A policy most általánosít, nem ragad lokális optimumba.
+**Áttörés (korábbi):** 7.8M lépésnél a reward pozitívba fordult (+42) és az ep hossz áttörte a 43 lépéses plafont (50 lépés).
 **Contact pattern bevezetése (12.2M+):** visszaesés -84-re, majd plató 52 ep hossznál. A gait reward (w=0.18) túl gyenge volt a régi modell "szokásaival" szemben → fresh start szükséges.
-**Jelenlegi legjobb korábbi Mac modell:** 10.2M lépés, reward=+51, ep hossz=51 (`roboshelf-results/phase2/models/best/best_model.zip`)
-**Fresh start (m2_3m_fresh, w_gait=0.18):** 2026-04-10-én indítva. 3M+6M lépés, de 43 ep hossznál megragadt. A gait reward konfliktusban volt a korai járásminta kialakításával.
+**Fresh start (m2_3m_fresh, w_gait=0.18):** 3M+6M lépés, de 43 ep hossznál megragadt. A gait reward konfliktusban volt a korai járásminta kialakításával.
 **Tanulság:** Gait reward-ot csak akkor szabad bevezetni, ha a robot már tud járni (reward > 0, ep hossz > 100). Curriculum megközelítés szükséges.
-**Következő fresh start (m2_3m_nogait, w_gait=0.0):** Gait kikapcsolva. Ha 3M után reward > -50, finetune-olni és csak akkor bevezetni a gait reward-ot.
+**Jelenlegi legjobb modell:** 20M lépés összesen, reward=+133.6, ep hossz=83 (`roboshelf-results/phase2/models/best/best_model.zip`)
 
 ---
 
@@ -179,6 +188,9 @@ roboshelf-results/phase2/logs/             ← TensorBoard logok + evaluations.n
 - Kaggle T4 GPU: MuJoCo csak CPU-n fut → GPU teljesen kihasználatlan. SB3 MlpPolicy CPU-ra van optimalizálva (issue #1245). Multi-GPU nem támogatott SB3-ban. Következtetés: Kaggle T4x2 csomag felesleges a mi feladatunkhoz.
 - Optimális Kaggle konfig (ha újra kellene): device='cpu', n_envs=4 (= 4 CPU core), batch_size=64
 - Git commit: sandbox-ból nem lehet pusholni (nincs auth) → Mac terminálból kell: `git push`
+- **±0.0 std determinizmus (KRITIKUS, MEGOLDVA v11-ben)**: Determinisztikus reset → policy mindig ugyanazt csinálja, eval szórás=0. Fix: reset noise_scale=0.01 (Humanoid-v4 mintájára). Ez volt a v8/v9/v10 plató gyökér oka.
+- **Tracking reward (v11+)**: `w_forward × dot(lin_vel[:2], direction_to_target)` — sebesség × célirány. Jobb mint y_velocity, mert minden irányban jutalmazza a haladást.
+- **Env reward súlyok (jelenlegi v11)**: w_forward=8.0, w_healthy=0.05, w_ctrl=-0.001, w_contact=-0.0001, w_fall=-20.0, w_gait=0.0
 
 ---
 
