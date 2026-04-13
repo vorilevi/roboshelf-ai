@@ -227,15 +227,9 @@ LEVELS = {
         "description": "M2 CPU ~1 óra (v11: reset noise, tracking reward, w_healthy=0.05)",
     },
     "m2_10m_v12": {
-        # v12: navigation-centrikus shaping
-        # v11 tanulság: tracking reward (vel × dir) nem garantálja hogy a robot tényleg közeledik
-        # (helyben forogva is kaphat rewardot ha a "mozgás" célirányba mutat)
-        # v12 újítások:
-        #   1. Potential-based distance shaping: (prev_dist - curr_dist) × 5.0
-        #      → közeledés jutalmaz, távolodás büntet, reset-en nulla (Ng 1999)
-        #   2. Proximity bonus: 2.0m-en belül lineáris extra (max +3.0/lépés célon)
-        #   3. Tracking reward: megmarad, de kisebb súly (8.0→4.0)
-        # Eredmény előrejelzés: ep hossz >100, dist_to_target 3.3m→<2.0m 20M lépés után
+        # v12: SIKERTELEN — w_forward 8→4 csökkentés catastrophic forgetting-et okozott
+        # reward: +133.6 → -121.3 összeomlás. Tanulság: scale shift finetune-nál végzetes.
+        # ARCHIVÁLT, ne használd!
         "total_timesteps": 10_000_000,
         "n_steps": 2048,
         "batch_size": 512,
@@ -243,7 +237,39 @@ LEVELS = {
         "n_envs": 4,
         "learning_rate": 1e-4,
         "clip_range": 0.15,
-        "description": "M2 CPU ~1 óra (v12: potential-based dist shaping + proximity bonus)",
+        "description": "ARCHIVÁLT - v12 összeomlott (w_forward scale shift) → használd v12b-t!",
+    },
+    "m2_10m_v12b": {
+        # v12b finetune: +94.8 reward (v11-hez képest jobb reward struktúra de 86 lépésnél még mindig esik)
+        # Tanulság: finetune nem tud beégett mozgásmintán változtatni
+        # ARCHIVÁLT (fresh start szükséges)
+        "total_timesteps": 10_000_000,
+        "n_steps": 2048,
+        "batch_size": 512,
+        "n_epochs": 10,
+        "n_envs": 4,
+        "learning_rate": 1e-4,
+        "clip_range": 0.15,
+        "description": "ARCHIVÁLT - v12b finetune: 94.8 reward, 86 lép (sub-step=1 fresh starthoz menj)",
+    },
+    "m2_10m_v13": {
+        # v13: FRESH START — sub-step 2→1 + v12b reward struktúra
+        # Diagnózis: 86 lépéses határ FIZIKAI INSTABILITÁS, nem reward döntés
+        #   - A policy a 2 sub-step fizikán tanult "bukó" mozgásmintát
+        #   - Finetune nem tudja felülírni — fresh start kell
+        # Változtatások:
+        #   - Sub-step: 2→1 (lassabb fizika, robot tovább stabil, más mozgásminta tanul)
+        #   - Reward: v12b MEGTARTVA (additív dist shaping + proximity, tracking=8.0)
+        #   - LR: 3e-4 (fresh start → nagyobb LR megengedett)
+        # Várható: ep hossz 86→200+, dist_to_target 3.3→<2.5m
+        "total_timesteps": 10_000_000,
+        "n_steps": 2048,
+        "batch_size": 512,
+        "n_epochs": 10,
+        "n_envs": 4,
+        "learning_rate": 3e-4,
+        "clip_range": 0.2,
+        "description": "M2 CPU ~1 óra (v13 FRESH: sub-step=1, v12b reward, cél: ep>200)",
     },
     "m2_5m_v9": {
         # v9: tracking reward (sebesség × célirány), w_healthy=0.05, w_forward=8.0

@@ -99,14 +99,11 @@ polcokat feltölteni. Végcél: befektetői demo. 5 fázis.
    cd ~/roboshelf-ai-dev/roboshelf-ai
    git add -A && git commit -m "v11 áttörés: reset noise fix, reward=+133.6, ep=83 (20M lépés)" && git push
    ```
-2. **v12 finetune indítása** — potential-based dist shaping + proximity bonus (env már frissítve):
+2. **v13 fresh start indítása** (sub-step=1 + v12b reward):
    ```bash
    cd ~/roboshelf-ai-dev/roboshelf-ai
-   python src/training/roboshelf_phase2_finetune.py --steps 10000000 --lr 3e-5 --clip 0.15
-   ```
-   Vagy fresh start v12-vel (ha a finetune lassú konvergenciát mutat):
-   ```bash
-   python src/training/roboshelf_phase2_train.py --level m2_10m_v12
+   git add -A && git commit -m "v13: sub-step=1 fresh start, 86-lépéses fizikai instabilitás fix" && git push
+   python src/training/roboshelf_phase2_train.py --level m2_10m_v13
    ```
 3. **Ep hossz vizsgálata** — miért terminál 83 lépésnél? Diagnosztizálni kell.
 4. **Fázis 3 tanítóscript megírása** — `src/envs/roboshelf_manipulation_env.py` már megvan,
@@ -162,6 +159,8 @@ roboshelf-results/phase2/logs/             ← TensorBoard logok + evaluations.n
 | 3.0M  | -2.50       | 79       | m2_5m_v9 — tracking reward, w_healthy=0.05, ±0.0 std (még mindig!) |
 | 10.0M | +78.7       | 79       | m2_10m_v11 — **ÁTTÖRÉS: reset noise_scale=0.01! ±29.4 std!** |
 | 20.0M | +133.6      | 83       | finetune 10M (lr=5e-5, clip=0.1) — eval görbe még emelkedik |
+| ~21M  | -121.3      | 83       | v12 finetune — catastrophic forgetting! (w_forward 8→4 scale shift) |
+| ~22M  | +94.8       | 86       | v12b finetune — visszaállt, de 86 lépéses fizikai határ megmarad |
 
 **KRITIKUS ÁTTÖRÉS (v11):** A reset noise_scale=0.01 bevezetése törte át a determinisztikus ±0.0 std falat. A policy most általánosít, nem ragad lokális optimumba.
 **Áttörés (korábbi):** 7.8M lépésnél a reward pozitívba fordult (+42) és az ep hossz áttörte a 43 lépéses plafont (50 lépés).
@@ -192,6 +191,11 @@ roboshelf-results/phase2/logs/             ← TensorBoard logok + evaluations.n
 - Optimális Kaggle konfig (ha újra kellene): device='cpu', n_envs=4 (= 4 CPU core), batch_size=64
 - Git commit: sandbox-ból nem lehet pusholni (nincs auth) → Mac terminálból kell: `git push`
 - **±0.0 std determinizmus (KRITIKUS, MEGOLDVA v11-ben)**: Determinisztikus reset → policy mindig ugyanazt csinálja, eval szórás=0. Fix: reset noise_scale=0.01 (Humanoid-v4 mintájára). Ez volt a v8/v9/v10 plató gyökér oka.
+- **86 lépéses fizikai határ (AKTÍV)**: A policy ~86 lépésnél konzisztensen elesik — ez nem reward döntés (break-even 10.8 lépés lenne), hanem fizikai instabilitás. A 2 sub-step fizikán tanult mozgásminta 86. lépésnél eléri stabilitási határát. Fix: sub-step 2→1 + fresh start (v13).
+- **Catastrophic forgetting (MEGOLDVA v12b-ben)**: Reward komponens súly csökkentése (w_forward 8→4) finetune során → VecNormalize stat eltolódás → policy összeomlás (+133→-121). Fix: additív reward shaping (nem cserélni, hanem hozzáadni).
+- **Finetune vs fresh start**: Ha egy policy "beégett" mozgásmintán ragad, finetune nem tudja felülírni. Fresh start szükséges az architektúrális változásokhoz (pl. sub-step szám).
+- **Sub-step**: 2→1 (v13-ban). Lassabb fizika → robot tovább stabil → más mozgásmintát tanul a policy.
+- **v12b reward súlyok (aktuális)**: w_forward=8.0, w_dist=8.0 (potential-based, ÚJ), w_proximity=2.0 (3.5m küszöb, ÚJ), w_healthy=0.05, w_ctrl=-0.001, w_contact=-0.0001, w_fall=-20.0, w_gait=0.0
 - **Tracking reward (v11+)**: `w_forward × dot(lin_vel[:2], direction_to_target)` — sebesség × célirány. Jobb mint y_velocity, mert minden irányban jutalmazza a haladást.
 - **Env reward súlyok (jelenlegi v12)**:
   - `w_forward=4.0` (tracking: vel × dir, csökkentve 8→4)

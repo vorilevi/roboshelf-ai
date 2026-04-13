@@ -76,26 +76,26 @@ class RoboshelfRetailNavEnv(gym.Env):
         self.target_pos = np.array([0.0, 3.8])  # Raktár pozíció (x, y)
         self.start_pos = np.array([0.0, 0.5])   # Robot start (x, y)
 
-        # --- Reward súlyok (v12: navigation-centrikus shaping) ---
-        # v11 tanulság: tracking reward motivál mozgást, de nem garantálja a KÖZELEDÉST
-        # (robot helyben foroghat és sebesség×irány = pozitív, de nem megy előre)
-        # v12 újítások:
-        #   1. Potential-based distance shaping: (prev_dist - curr_dist) × w_dist
-        #      → minden közeledési lépés jutalmaz, távolodás büntet
-        #      → Ng et al. 1999: reward shaping, ami nem torzítja az optimális policy-t
-        #   2. Proximity bonus: ha 2.0m-en belül (start: 3.3m), lineáris extra jutalom
-        #      → rövid időablakot nem igényel, automatikusan skálázódik
-        #   3. Tracking reward marad (sebesség komponens), de kisebb súllyal
-        #   4. w_healthy=0.05 marad (v11 bevált értéken)
-        self.w_forward = 4.0       # Sebesség × célirány (tracking reward) — csökkentve 8.0→4.0
-        self.w_dist = 5.0          # Potential-based: (prev_dist - curr_dist) per step [ÚJ v12]
-        self.w_proximity = 3.0     # Proximity bonus: lineáris, 0.0m (cél) → 2.0m (küszöb) [ÚJ v12]
-        self.w_healthy = 0.05      # Minimális alive bonus (v11-ben bevált)
-        self.w_ctrl = -0.001       # Kontroll költség az AKCIÓRA (action²)
-        self.w_contact = -0.0001   # Kontakt költség
-        self.w_goal = 100.0        # Célba érkezés bonus
-        self.w_fall = -20.0        # Esés büntetés
-        self.w_gait = 0.0          # Kikapcsolva (curriculum — csak ha ep > 200 lépés stabilan)
+        # --- Reward súlyok (v12b: navigation-centrikus shaping, ADDITÍV) ---
+        # v12 tanulság: w_forward csökkentése (8→4) catastrophic forgetting-et okoz!
+        # A finetune-olt policy a 8.0-s súlyon van betanítva → scale shift → összeomlik
+        # v12b javítás: az összes v11 komponens VÁLTOZATLAN marad, csak hozzáadjuk a dist shapinget
+        #
+        # Kulcselv: ADDITÍV shaping, nem csere!
+        #   - w_forward=8.0 MARAD (policy nem zavar össze)
+        #   - dist shaping RÁÉPÜL: extra jutalom a valódi közeledésért
+        #   - proximity threshold MEGNÖVELVE: 3.5m (start=3.3m, tehát azonnal aktív!)
+        #
+        # Várható hatás: az epizód első lépésétől proximity bonus aktív → erős navigációs jel
+        self.w_forward = 8.0       # Sebesség × célirány — VÁLTOZATLAN (v11 érték!)
+        self.w_dist = 8.0          # Potential-based: (prev_dist - curr_dist) × 8.0 — RÁÉPÜL
+        self.w_proximity = 2.0     # Proximity bonus: 3.5m küszöb → azonnal aktív (start=3.3m)
+        self.w_healthy = 0.05      # Minimális alive bonus — VÁLTOZATLAN
+        self.w_ctrl = -0.001       # Kontroll költség — VÁLTOZATLAN
+        self.w_contact = -0.0001   # Kontakt költség — VÁLTOZATLAN
+        self.w_goal = 100.0        # Célba érkezés bonus — VÁLTOZATLAN
+        self.w_fall = -20.0        # Esés büntetés — VÁLTOZATLAN
+        self.w_gait = 0.0          # Kikapcsolva (curriculum)
 
         # --- Gait paraméterek (ciklikus lépésminta) ---
         # 0.8s periódus = 1.25 lépés/mp, 50% offset = szimmetrikus bal-jobb váltás
@@ -268,14 +268,15 @@ class RoboshelfRetailNavEnv(gym.Env):
         dist_shaping = self.w_dist * dist_delta
         self._prev_dist_to_target = dist_to_target
 
-        # 3. Proximity bonus (ÚJ v12)
-        # Ha a robot 2.0m-en belül van a céltól, lineáris bonus
-        # Start: 3.3m → 0 bonus. Cél: 0m → max bonus (w_proximity × 2.0 / normalizálva)
-        # Ez rövid időablakon belüli kényszert helyettesít, de folytonos és stabil
-        PROXIMITY_THRESHOLD = 2.0  # méter, start=3.3m tehát ez a "félúton" küszöb
+        # 3. Proximity bonus (v12b: küszöb 3.5m → azonnal aktív!)
+        # v12 hiba: 2.0m küszöb soha nem aktiválódott (robot 3.22m-en maradt)
+        # v12b javítás: 3.5m küszöb → az epizód ELSŐ lépésétől aktív jutalom
+        # Start: 3.3m → kis pozitív bonus. Cél (0m): w_proximity
+        # Lineáris skálázás: minél közelebb, annál több
+        PROXIMITY_THRESHOLD = 3.5  # méter — start=3.3m tehát AZONNAL aktív
         proximity_bonus = 0.0
         if dist_to_target < PROXIMITY_THRESHOLD:
-            # Lineáris: 2.0m → 0.0, 0.0m → w_proximity
+            # Lineáris: 3.5m → 0.0, 0.0m → w_proximity
             proximity_bonus = self.w_proximity * (PROXIMITY_THRESHOLD - dist_to_target) / PROXIMITY_THRESHOLD
 
         # 4. Egyensúly jutalom
@@ -419,13 +420,15 @@ class RoboshelfRetailNavEnv(gym.Env):
             raw_ctrl = self._default_ctrl + action * ACTION_SCALE
             self.data.ctrl[:] = np.clip(raw_ctrl, ctrl_range[:, 0], ctrl_range[:, 1])
 
-        # Fizikai szimuláció (2 sub-step — csökkentve 5-ről)
-        # Kevesebb sub-step = lassabb fizika = robot tovább marad talpon = több tanulási jel
-        for _ in range(2):
+        # Fizikai szimuláció (1 sub-step — csökkentve 2-ről)
+        # v12b: 1 sub-step = leglelassabb fizika = robot legtovább stabil
+        # v11/v12 tanulság: 86 lépéses határ fizikai instabilitásból ered, nem reward döntésből
+        # 1 sub-step → timestep hatása felére csökken → más mozgásmintát tanul a policy
+        for _ in range(1):
             mujoco.mj_step(self.model, self.data)
 
         # Gait időszámláló léptetése
-        self._episode_time += 2 * self.model.opt.timestep
+        self._episode_time += 1 * self.model.opt.timestep
 
         # Observation
         obs = self._get_obs()
