@@ -355,11 +355,10 @@ LEVELS = {
         },
     },
     "m2_20m_v17": {
-        # v17 curriculum, 20M lépés — a curriculum fázisok arányosan skálázva
-        # 10M: 0-3M / 3M-7M / 7M-10M  →  20M: 0-6M / 6M-14M / 14M-20M
-        # Indok: a curriculum minden fázisnak több időt ad, különösen a finom annealing-nek
-        # Várható: a robot a 6M-es plafon után több időt tölt az átmeneti fázisban
-        # → jobb járásminta mire a teljes súlyt kap (14M-nél)
+        # v17 curriculum, 20M lépés
+        # Eredmény: 8M-nál +199 reward (curriculum működött!), majd -15241 (kapálózás beégett)
+        # Diagnózis: w_air_time feltétel nélkül → kapálózás optimum; 6M fázis1 túl hosszú
+        # → v18 javítja: air_time feltételes + smoothness penalties + rövidebb fázis1
         "total_timesteps": 20_000_000,
         "n_steps": 2048,
         "batch_size": 512,
@@ -367,11 +366,45 @@ LEVELS = {
         "n_envs": 4,
         "learning_rate": 3e-4,
         "clip_range": 0.2,
-        "description": "M2 CPU ~2 óra (v17 FRESH 20M: curriculum arányosan skálázva)",
+        "description": "ARCHIVÁLT - v17 20M: +199@8M majd -15241 (kapálózás beégett) → v18",
         "curriculum": {
-            "phase1_end":         6_000_000,  # teljes felhajtóerő, stuck ki
-            "phase2_end":        14_000_000,  # lineáris annealing
-            "max_buoyancy":       103.0,       # N (30%, konzervatív)
+            "phase1_end":         6_000_000,
+            "phase2_end":        14_000_000,
+            "max_buoyancy":       103.0,
+            "stuck_window_start": 9999,
+            "stuck_window_end":   40,
+        },
+    },
+    "m2_20m_v18": {
+        # v18: Smoothness penalties + feltételes air_time + rövidebb curriculum + ent_coef=0.01
+        #
+        # v17 diagnózis: "kapálózás" lokális optimum
+        #   - w_air_time=3.0 feltétel nélkül → helyben kapálózás kifizetődő a felhajtóerőben
+        #   - 6M lépéses 1. fázis túl hosszú → entrópia elfogy, policy beég
+        #   - Felhajtóerő eltűntével a kapálózás csillagászati ctrl/contact cost-ot okoz
+        #
+        # v18 három fix:
+        #   1. air_time feltételes: csak v_forward > 0.1 m/s esetén jutalmaz
+        #      Helyben kapálózás értéke: 0 → nem kifizetődő
+        #   2. Smoothness penalties (Isaac Lab / ETH ANYmal alapján):
+        #      action_rate=-0.01, dof_acc=-2.5e-7, dof_vel=-1e-3
+        #      Nagy nyomatékú kapálózás azonnal büntetve
+        #   3. Rövidebb curriculum: 1M fázis1, 1M-3M annealing (volt: 6M/14M)
+        #      Kevesebb idő a könnyített fizikán → nem égeti be a kapálózást
+        #   4. ent_coef=0.01 (volt: 0.001): entrópia megőrzése az annealing alatt
+        "total_timesteps": 20_000_000,
+        "n_steps": 2048,
+        "batch_size": 512,
+        "n_epochs": 10,
+        "n_envs": 4,
+        "learning_rate": 3e-4,
+        "clip_range": 0.2,
+        "ent_coef": 0.01,
+        "description": "M2 CPU ~2 óra (v18 FRESH 20M: smoothness + feltételes air_time + ent_coef=0.01)",
+        "curriculum": {
+            "phase1_end":         1_000_000,  # csak 1M felhajtóerő (volt: 6M)
+            "phase2_end":         3_000_000,  # 1M-3M annealing (volt: 6M-14M)
+            "max_buoyancy":       103.0,
             "stuck_window_start": 9999,
             "stuck_window_end":   40,
         },
@@ -503,7 +536,7 @@ def train(args):
         gamma=0.99,
         gae_lambda=0.95,
         clip_range=cfg["clip_range"],
-        ent_coef=0.001,
+        ent_coef=cfg.get("ent_coef", 0.001),
         vf_coef=0.5,
         max_grad_norm=0.5,
         tensorboard_log=str(LOGS_DIR),

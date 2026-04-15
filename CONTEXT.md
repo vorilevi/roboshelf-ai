@@ -1,7 +1,7 @@
 # Roboshelf AI — Session Kontextus
 
 > Ezt a fájlt az AI olvassa, hogy gyorsan felvegye a fonalat.
-> Utoljára frissítve: 2026-04-15 (v17 env + curriculum kész, fresh start következik)
+> Utoljára frissítve: 2026-04-15 (v18 env kész: smoothness penalties + feltételes air_time)
 
 ---
 
@@ -83,29 +83,25 @@ polcokat feltölteni. Végcél: befektetői demo. 5 fázis.
 
 ## Ami éppen fut
 
-**KÉSZ** — v17 env + CurriculumCallback megírva (2026-04-15):
-- `src/envs/roboshelf_retail_nav_env.py` → v17: felhajtóerő (xfrc_applied) + lineáris tracking visszaállítva + w_air_time=3.0
-- `src/training/roboshelf_phase2_train.py` → CurriculumCallback + `m2_10m_v17` szint
+**KÉSZ** — v18 env + m2_20m_v18 szint megírva (2026-04-15):
+- `src/envs/roboshelf_retail_nav_env.py` → v18: feltételes air_time + smoothness penalties
+- `src/training/roboshelf_phase2_train.py` → `m2_20m_v18` + `ent_coef` per-szint konfig
 
-**v16 fresh start eredménye (2026-04-15):**
-- `python src/training/roboshelf_phase2_train.py --level m2_10m_v16`
-- Eredmény: reward=-192.7 (±32.4), **ep=40 MINDEN futásnál**
-- Diagnózis: stuck-detection zsákutca — a PPO az ablak méretére optimalizál, nem a járásra
+**v17 20M eredménye (2026-04-15):**
+- `python src/training/roboshelf_phase2_train.py --level m2_20m_v17`
+- 8M-nál: reward=+199 (curriculum működött!) → 12M-nál: -15241 (kapálózás beégett)
+- Diagnózis: feltétel nélküli air_time → kapálózás optimum; 6M fázis1 túl hosszú → entrópia elfogyott
 
 ---
 
 ## Következő teendők (prioritás sorrendben)
 
-1. **GitHub push + v17 fresh start (20M!)** — Mac terminálból:
+1. **GitHub push + v18 fresh start (20M)** — Mac terminálból:
    ```bash
    cd ~/roboshelf-ai-dev/roboshelf-ai
-   git add -A && git commit -m "v17: curriculum felhajtóerő + stuck annealing + w_air_time=3.0" && git push
-   python src/training/roboshelf_phase2_train.py --level m2_20m_v17
+   git add -A && git commit -m "v18: smoothness penalties + feltételes air_time + ent_coef=0.01" && git push
+   python src/training/roboshelf_phase2_train.py --level m2_20m_v18
    ```
-   **FONTOS az első futásnál:** ellenőrizd a kiírt értékeket:
-   - `G1 teljes tömeg: X kg, súly: Y N` — ha Y > 400N, a G1 XML tartalmaz virtuális torzót
-   - `Felhajtóerő: 103.0 N (Z% ellensúlyozva)` — ha Z > 50%, felezzük tovább
-   - Ha a robot az első lépésben `torso_z > 1.5m` → felhajtóerő túl nagy, csökkenteni kell
 2. **Fázis 3 tanítóscript megírása** — `src/envs/roboshelf_manipulation_env.py` már megvan,
    csak a `src/training/roboshelf_phase3_train.py` hiányzik
 

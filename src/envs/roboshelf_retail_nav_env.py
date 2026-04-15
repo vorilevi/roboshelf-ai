@@ -57,6 +57,9 @@ class RoboshelfRetailNavEnv(gym.Env):
         super().__init__()
         self.render_mode = render_mode
 
+        # Curriculum paraméter előre definiálva (_load_model() printje már használja)
+        self.buoyancy_force = 103.0  # N — CurriculumCallback felülírja
+
         # --- MJCF betöltés ---
         self._load_model()
 
@@ -76,33 +79,36 @@ class RoboshelfRetailNavEnv(gym.Env):
         self.target_pos = np.array([0.0, 3.8])  # Raktár pozíció (x, y)
         self.start_pos = np.array([0.0, 0.5])   # Robot start (x, y)
 
-        # --- Reward súlyok (v17) ---
-        # v16 diagnózis: ep=40 MINDEN futásnál → stuck-window méretét tanulja meg, nem a járást
-        #   Alapprobléma: stuck-detection a szimptómát bünteti, nem az okot
-        #   A PPO mindig megtalálja az ablak méretét és arra optimalizál
+        # --- Reward súlyok (v18) ---
+        # v17 diagnózis: curriculum 8M-nál +199 reward → majd katasztrófa (-15241)
+        #   Probléma 1: w_air_time=3.0 feltétel nélkül → "kapálózás" helyi optimum
+        #     A robot megtanult helyben lábat rázni a felhajtóerőben (könnyű, nem esik)
+        #     A PPO entrópiája elfogyott → policy beégett → képtelen változtatni
+        #   Probléma 2: felhajtóerő eltűntével a kapálózás csillagászati ctrl/contact cost-ot okoz
+        #   Probléma 3: curriculum első fázis (6M) túl hosszú → túltanulás a könnyített fizikán
         #
-        # v17 megközelítés: Curriculum tanítás (ETH Zürich ANYmal, Unitree pipeline)
-        #   1. Felhajtóerő (buoyancy assist): Z-irányú külső erő a pelvis-en
-        #      - 0-3M lépés: gravitáció 60%-át ellensúlyozza (~206N felfelé)
-        #      - 3M-7M lépés: lineáris csökkentés 100%→0%
-        #      - 7M-10M lépés: 0% (teljes súly)
-        #      Hatás: robot nehezebben esik el → mer lábat emelni → tapasztalja az air_time jutalmat
-        #   2. Stuck-window annealing: CurriculumCallback frissíti a train scriptből
-        #      - 0-3M: stuck kikapcsolva (stuck_window=9999)
-        #      - 3M-7M: 200→40 lépés lineárisan
-        #      - 7M-10M: 40 lépés (fix)
-        #      Hatás: nem bünteti a lassú kezdeti tanulást, de a végén szigorú
-        #   3. w_air_time=3.0 marad (v16-ból, bevált erős motiváció)
-        #   4. Lineáris vel tracking visszaállítva (v11 bevált: w_forward × forward_component)
-        #      Gaussian (v15/v16) nem adott erős haladási gradienst
+        # v18 három fix (legged_gym / Isaac Lab alapján):
+        #   1. air_time feltételes: csak v_forward > 0.1 m/s esetén jutalmaz
+        #      Ref: legged_gym "first_foot_contact × velocity" logika
+        #      Helyben kapálózás értéke: 0 (nem kifizetődő)
+        #   2. Smoothness penalties (simasági büntetések):
+        #      action_rate: -(a_t - a_{t-1})² × w — hirtelen akcióváltás büntetése
+        #      dof_acc:     -ízületi gyorsulás² × w — nagy gyorsulás büntetése
+        #      dof_vel:     -ízületi sebesség² × w — nagy sebesség büntetése
+        #      Ref: Isaac Lab humanoid training, ETH ANYmal pipeline
+        #   3. ent_coef=0.01 (train scriptben) — entrópia megőrzése az annealing alatt
 
         self.w_forward = 8.0         # Lineáris vel tracking (v11 bevált érték)
         self.w_dist = 2.0            # Per-lépés PBRS (Ng et al. 1999)
         self.w_dist_final = 200.0    # Epizód végi dist bonus
         self.w_proximity = 2.0       # Proximity bonus 3.5m küszöbön
-        self.w_air_time = 3.0        # Feet air time (v16-ból: erős lépési motiváció)
+        self.w_air_time = 3.0        # Feet air time [v18: csak v>0.1 m/s esetén!]
+        self.vel_air_threshold = 0.1  # m/s — ez alatt air_time = 0 (kapálózás elkerülése)
         self.w_healthy = 0.05        # Minimális alive bonus
-        self.w_ctrl = -0.001         # Kontroll költség
+        self.w_ctrl = -0.001         # Kontroll költség (action²)
+        self.w_action_rate = -0.01   # Akció változás büntetés [ÚJ v18] — (a_t - a_{t-1})²
+        self.w_dof_acc = -2.5e-7     # Ízületi gyorsulás büntetés [ÚJ v18]
+        self.w_dof_vel = -1e-3       # Ízületi sebesség büntetés [ÚJ v18]
         self.w_contact = -0.0001     # Kontakt költség
         self.w_goal = 100.0          # Célba érkezés bonus
         self.w_fall = -20.0          # Esés büntetés
@@ -203,12 +209,12 @@ class RoboshelfRetailNavEnv(gym.Env):
             # Fallback: első nem-world body
             self._torso_id = 1
 
-        # G1 teljes tömeg kiszámítása (összes body összege)
-        total_mass = sum(self.model.body_mass)
-        weight_N = total_mass * 9.81
+        # G1 robot tömege (fix spec érték — body_mass az egész scene-t tartalmazza!)
+        G1_MASS_KG = 35.0  # Unitree G1 spec: ~35 kg
+        g1_weight_N = G1_MASS_KG * 9.81  # ~343 N
         print(f"  ✅ Retail Nav env betöltve: {self.model.nbody} body, {self.model.nu} actuators")
-        print(f"  ℹ️  G1 teljes tömeg: {total_mass:.1f} kg, súly: {weight_N:.1f} N")
-        print(f"  ℹ️  Felhajtóerő: {self.buoyancy_force:.1f} N ({self.buoyancy_force/weight_N*100:.1f}% ellensúlyozva)")
+        print(f"  ℹ️  G1 tömeg (spec): {G1_MASS_KG} kg, súly: {g1_weight_N:.1f} N | "
+              f"Felhajtóerő: {self.buoyancy_force:.1f} N ({self.buoyancy_force/g1_weight_N*100:.1f}%)")
 
         # Láb body indexek megkeresése (G1: ankle_roll_link)
         foot_candidates = [
@@ -324,18 +330,31 @@ class RoboshelfRetailNavEnv(gym.Env):
         # 8. Esés büntetés (termináláskor egyszer)
         fall_penalty = self.w_fall if not self._is_healthy() else 0.0
 
-        # 9. Feet air time jutalom (v15: forward_component feltétel ELTÁVOLÍTVA!)
-        # v14 hiba: if forward_component > 0 → tyúk-tojás probléma
-        # (robot épp azért nem halad, mert nem emel lábat; de jutalom csak ha halad)
-        # v15 fix: mindig jutalmaz lábemelésnél → a mozgás MEGELŐZHETI a haladást
+        # 9. Feet air time jutalom [v18: feltételes — csak v_forward > vel_air_threshold]
+        # v17 hiba: feltétel nélküli air_time → "kapálózás" helyi optimum
+        #   Robot megtanult helyben lábat rázni (felhajtóerőben lóg) → entrópia elfogy
+        # v18 fix (legged_gym konvenció): jutalom csak ha robot tényleg halad
+        #   Helyben kapálózás értéke: 0.0 → nem kifizetődő
         air_time_reward = 0.0
         if self._left_foot_id is not None and self.w_air_time > 0.0:
-            left_contact  = self.data.cfrc_ext[self._left_foot_id,  2] > 1.0
-            right_contact = self.data.cfrc_ext[self._right_foot_id, 2] > 1.0
-            n_air = (not left_contact) + (not right_contact)  # 0, 1 vagy 2
-            air_time_reward = self.w_air_time * n_air
+            if forward_component > self.vel_air_threshold:  # csak haladásnál jutalmaz
+                left_contact  = self.data.cfrc_ext[self._left_foot_id,  2] > 1.0
+                right_contact = self.data.cfrc_ext[self._right_foot_id, 2] > 1.0
+                n_air = (not left_contact) + (not right_contact)
+                air_time_reward = self.w_air_time * n_air
 
-        # 10. Gait timing reward — kikapcsolva (curriculum)
+        # 10. Smoothness penalties [ÚJ v18 — Isaac Lab / ETH ANYmal alapján]
+        # Megakadályozzák a nagy nyomatékú kapálózást és hirtelen akcióváltásokat
+        # a) action_rate: az előző és jelenlegi akció különbsége — simább mozgás
+        action_rate_cost = self.w_action_rate * np.sum(
+            np.square(self._last_action - self._prev_action)
+        )
+        # b) dof_acc: ízületi gyorsulás (qacc) — nagy gyorsulás büntetése
+        dof_acc_cost = self.w_dof_acc * np.sum(np.square(self.data.qacc[6:]))  # 6: freejoint kihagyva
+        # c) dof_vel: ízületi sebesség (qvel) — nagy sebesség büntetése
+        dof_vel_cost = self.w_dof_vel * np.sum(np.square(self.data.qvel[6:]))
+
+        # 11. Gait timing reward — kikapcsolva (curriculum)
         gait_reward = 0.0
         if self._left_foot_id is not None and self.w_gait > 0.0:
             phase = (self._episode_time % self._gait_period) / self._gait_period
@@ -351,7 +370,8 @@ class RoboshelfRetailNavEnv(gym.Env):
 
         total_reward = (vel_tracking + dist_shaping + proximity_bonus
                         + healthy_reward + ctrl_cost + contact_cost
-                        + goal_bonus + fall_penalty + air_time_reward + gait_reward)
+                        + goal_bonus + fall_penalty + air_time_reward
+                        + action_rate_cost + dof_acc_cost + dof_vel_cost + gait_reward)
 
         info = {
             "forward_reward": vel_tracking,
@@ -361,6 +381,9 @@ class RoboshelfRetailNavEnv(gym.Env):
             "healthy_reward": healthy_reward,
             "ctrl_cost": ctrl_cost,
             "contact_cost": contact_cost,
+            "action_rate_cost": action_rate_cost,
+            "dof_acc_cost": dof_acc_cost,
+            "dof_vel_cost": dof_vel_cost,
             "goal_bonus": goal_bonus,
             "fall_penalty": fall_penalty,
             "air_time_reward": air_time_reward,
@@ -447,8 +470,9 @@ class RoboshelfRetailNavEnv(gym.Env):
         )
         self._start_dist_to_target = self._prev_dist_to_target  # epizód végi dist bonus
         self._episode_time = 0.0  # Gait fázis időszámláló nullázása
-        self._last_action = np.zeros(self.model.nu)  # ctrl cost inicializálás
-        self._vel_history = []  # v15: stuck-detection előzmény nullázása
+        self._last_action = np.zeros(self.model.nu)   # ctrl cost inicializálás
+        self._prev_action = np.zeros(self.model.nu)   # v18: action_rate cost inicializálás
+        self._vel_history = []  # stuck-detection előzmény nullázása
 
         obs = self._get_obs()
         info = {"dist_to_target": self._prev_dist_to_target}
@@ -459,7 +483,8 @@ class RoboshelfRetailNavEnv(gym.Env):
         """Egy szimuláció lépés végrehajtása."""
         # Akció skálázás: [-1, 1] → aktuátor tartomány
         action = np.clip(action, -1.0, 1.0)
-        self._last_action = action.copy()  # ctrl cost számításhoz (Humanoid-v4: action² alapú)
+        self._prev_action = self._last_action.copy()  # v18: action_rate cost (előző lépés akciója)
+        self._last_action = action.copy()             # ctrl cost + action_rate alapja
 
         # Aktuátor vezérlés beállítása
         # Az akció a keyframe default_ctrl körüli offset (nem a tartomány közepe!)
