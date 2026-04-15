@@ -253,15 +253,9 @@ LEVELS = {
         "description": "ARCHIVÁLT - v12b finetune: 94.8 reward, 86 lép (sub-step=1 fresh starthoz menj)",
     },
     "m2_10m_v13": {
-        # v13: FRESH START — sub-step 2→1 + v12b reward struktúra
-        # Diagnózis: 86 lépéses határ FIZIKAI INSTABILITÁS, nem reward döntés
-        #   - A policy a 2 sub-step fizikán tanult "bukó" mozgásmintát
-        #   - Finetune nem tudja felülírni — fresh start kell
-        # Változtatások:
-        #   - Sub-step: 2→1 (lassabb fizika, robot tovább stabil, más mozgásminta tanul)
-        #   - Reward: v12b MEGTARTVA (additív dist shaping + proximity, tracking=8.0)
-        #   - LR: 3e-4 (fresh start → nagyobb LR megengedett)
-        # Várható: ep hossz 86→200+, dist_to_target 3.3→<2.5m
+        # v13: SIKERTELEN — sub-step=1 → cvel más skálán → tracking negatív (-2.04/lép)
+        # reward=-330.9, ep=169 (hosszabb lett ✅ de navigáció nem tanul ❌)
+        # ARCHIVÁLT
         "total_timesteps": 10_000_000,
         "n_steps": 2048,
         "batch_size": 512,
@@ -269,7 +263,27 @@ LEVELS = {
         "n_envs": 4,
         "learning_rate": 3e-4,
         "clip_range": 0.2,
-        "description": "M2 CPU ~1 óra (v13 FRESH: sub-step=1, v12b reward, cél: ep>200)",
+        "description": "ARCHIVÁLT - v13: sub-step=1 sikertelen (tracking negatív lett)",
+    },
+    "m2_10m_v14": {
+        # v14: Epizód végi dist bonus — az igazi navigációs jel
+        # v13 tanulság: sub-step=1 → cvel negatív; sub-step=2 visszaállítva
+        # v12b tanulság: per-lépés dist_shaping matematikailag gyenge (0.002m/lép)
+        #
+        # Megoldás: w_dist_final=200 × (start_dist - final_dist) EGYSZER az ep végén
+        #   - Ha 86 lép alatt 0.5m közel: +100 bonus (= 1.16/lép ekvivalens) → DOMINÁNS
+        #   - Ha helyben marad: +0 → nagy különbség a navigáló és nem-navigáló policy között
+        #   - sub-step=2 visszaállítva (tracking működik 2 sub-stepnél)
+        #   - Finetune a v11/v12b modellből: tracking reward már jól működik
+        # Várható: a robot ERŐSEN motivált lesz közeledni → dist_to_target <2.5m
+        "total_timesteps": 10_000_000,
+        "n_steps": 2048,
+        "batch_size": 512,
+        "n_epochs": 10,
+        "n_envs": 4,
+        "learning_rate": 3e-4,
+        "clip_range": 0.2,
+        "description": "M2 CPU ~1 óra (v14 FRESH: ep-végi dist bonus w=200, sub-step=2)",
     },
     "m2_5m_v9": {
         # v9: tracking reward (sebesség × célirány), w_healthy=0.05, w_forward=8.0

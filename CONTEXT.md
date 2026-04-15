@@ -99,12 +99,13 @@ polcokat feltölteni. Végcél: befektetői demo. 5 fázis.
    cd ~/roboshelf-ai-dev/roboshelf-ai
    git add -A && git commit -m "v11 áttörés: reset noise fix, reward=+133.6, ep=83 (20M lépés)" && git push
    ```
-2. **v13 fresh start indítása** (sub-step=1 + v12b reward):
+2. **v14 fresh start indítása** (sub-step=2 visszaállítva + epizód végi dist bonus):
    ```bash
    cd ~/roboshelf-ai-dev/roboshelf-ai
-   git add -A && git commit -m "v13: sub-step=1 fresh start, 86-lépéses fizikai instabilitás fix" && git push
-   python src/training/roboshelf_phase2_train.py --level m2_10m_v13
+   git add -A && git commit -m "v14: ep-végi dist bonus w=200, sub-step=2 visszaállítva" && git push
+   python src/training/roboshelf_phase2_train.py --level m2_10m_v14
    ```
+   **Várható:** ep-végi +100 bonus közeledésért → 140+ extra reward a navigálónak → robot megtanul közeledni
 3. **Ep hossz vizsgálata** — miért terminál 83 lépésnél? Diagnosztizálni kell.
 4. **Fázis 3 tanítóscript megírása** — `src/envs/roboshelf_manipulation_env.py` már megvan,
    csak a `src/training/roboshelf_phase3_train.py` hiányzik
@@ -161,6 +162,7 @@ roboshelf-results/phase2/logs/             ← TensorBoard logok + evaluations.n
 | 20.0M | +133.6      | 83       | finetune 10M (lr=5e-5, clip=0.1) — eval görbe még emelkedik |
 | ~21M  | -121.3      | 83       | v12 finetune — catastrophic forgetting! (w_forward 8→4 scale shift) |
 | ~22M  | +94.8       | 86       | v12b finetune — visszaállt, de 86 lépéses fizikai határ megmarad |
+| 10M   | -330.9      | 169      | v13 fresh (sub-step=1) — cvel skála megváltozott → tracking negatív |
 
 **KRITIKUS ÁTTÖRÉS (v11):** A reset noise_scale=0.01 bevezetése törte át a determinisztikus ±0.0 std falat. A policy most általánosít, nem ragad lokális optimumba.
 **Áttörés (korábbi):** 7.8M lépésnél a reward pozitívba fordult (+42) és az ep hossz áttörte a 43 lépéses plafont (50 lépés).

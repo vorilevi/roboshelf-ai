@@ -76,26 +76,37 @@ class RoboshelfRetailNavEnv(gym.Env):
         self.target_pos = np.array([0.0, 3.8])  # Raktár pozíció (x, y)
         self.start_pos = np.array([0.0, 0.5])   # Robot start (x, y)
 
-        # --- Reward súlyok (v12b: navigation-centrikus shaping, ADDITÍV) ---
-        # v12 tanulság: w_forward csökkentése (8→4) catastrophic forgetting-et okoz!
-        # A finetune-olt policy a 8.0-s súlyon van betanítva → scale shift → összeomlik
-        # v12b javítás: az összes v11 komponens VÁLTOZATLAN marad, csak hozzáadjuk a dist shapinget
+        # --- Reward súlyok (v14: epizód végi dist bonus — az igazi navigációs jel) ---
+        # v13 tanulság: sub-step=1 → cvel más skálán → tracking negatív → összeomlik
+        #               sub-step=2 visszaállítva
+        # v12b tanulság: per-lépés dist_shaping GYENGE (0.002m/lép × w_dist = semmi)
+        #               Math: 0.5 m/s × 0.004s = 0.002m/lép → még w_dist=500-zal is 1/lép
         #
-        # Kulcselv: ADDITÍV shaping, nem csere!
-        #   - w_forward=8.0 MARAD (policy nem zavar össze)
-        #   - dist shaping RÁÉPÜL: extra jutalom a valódi közeledésért
-        #   - proximity threshold MEGNÖVELVE: 3.5m (start=3.3m, tehát azonnal aktív!)
+        # MEGOLDÁS: epizód VÉGI egyszeri dist bonus (termináláskor vagy truncation-kor)
+        #   w_dist_final=200 × (start_dist - final_dist):
+        #   - Ha 86 lépés alatt 0.5m-t megy: +200×0.5 = +100 bonus (= 1.16/lépés ekvivalens)
+        #   - Ez ERŐSEBB mint a tracking reward → DOMINÁL a navigáció
+        #   - Per-lépés dist shaping lecsökkentve (vestigial, stabilizáló hatás)
         #
-        # Várható hatás: az epizód első lépésétől proximity bonus aktív → erős navigációs jel
-        self.w_forward = 8.0       # Sebesség × célirány — VÁLTOZATLAN (v11 érték!)
-        self.w_dist = 8.0          # Potential-based: (prev_dist - curr_dist) × 8.0 — RÁÉPÜL
-        self.w_proximity = 2.0     # Proximity bonus: 3.5m küszöb → azonnal aktív (start=3.3m)
-        self.w_healthy = 0.05      # Minimális alive bonus — VÁLTOZATLAN
-        self.w_ctrl = -0.001       # Kontroll költség — VÁLTOZATLAN
-        self.w_contact = -0.0001   # Kontakt költség — VÁLTOZATLAN
-        self.w_goal = 100.0        # Célba érkezés bonus — VÁLTOZATLAN
-        self.w_fall = -20.0        # Esés büntetés — VÁLTOZATLAN
-        self.w_gait = 0.0          # Kikapcsolva (curriculum)
+        # Kulcsszámok:
+        #   - Ha robot 3.3m-nél marad: +0 dist bonus
+        #   - Ha 2.5m-re megy (0.8m): +200×0.8 = +160 bonus az epizód végén
+        #   - Ha célba ér (0m): +200×3.3 = +660 → erős végső motiváció
+        self.w_forward = 8.0         # Sebesség × célirány — VÁLTOZATLAN (v11 bevált érték)
+        self.w_dist = 2.0            # Per-lépés potential shaping (kis súly, csak stabilizál)
+        self.w_dist_final = 200.0    # Epizód VÉGI egyszeri dist bonus [ÚJ v14!]
+        self.w_proximity = 2.0       # Proximity bonus 3.5m küszöbön — marad
+        self.w_air_time = 1.0        # Feet air time jutalom [ÚJ v14!]
+                                     # legged_gym/Isaac Gym konvenció: valódi lépést jutalmaz
+                                     # cfrc_ext[foot,2]<=0 → levegőben → +reward
+                                     # Megakadályozza a "shuffle" (csoszogó) mozgásmintát
+        self.w_healthy = 0.05        # Minimális alive bonus (MÁR 100×-os csökkentés v4-hez képest)
+                                     # Annealing NEM szükséges: 0.05×86=4.15 = 2.7% a total rewardnak
+        self.w_ctrl = -0.001         # Kontroll költség — VÁLTOZATLAN
+        self.w_contact = -0.0001     # Kontakt költség — VÁLTOZATLAN
+        self.w_goal = 100.0          # Célba érkezés bonus — VÁLTOZATLAN
+        self.w_fall = -20.0          # Esés büntetés — VÁLTOZATLAN
+        self.w_gait = 0.0            # Kikapcsolva (curriculum)
 
         # --- Gait paraméterek (ciklikus lépésminta) ---
         # 0.8s periódus = 1.25 lépés/mp, 50% offset = szimmetrikus bal-jobb váltás
@@ -297,7 +308,25 @@ class RoboshelfRetailNavEnv(gym.Env):
         # 8. Esés büntetés: csak termináláskor, egyszer
         fall_penalty = self.w_fall if not self._is_healthy() else 0.0
 
-        # 9. Contact pattern reward (gait timing — jelenleg kikapcsolva, curriculum-ra vár)
+        # 9. Feet air time jutalom (ÚJ v14 — legged_gym/Isaac Gym konvenció)
+        # A robot valódi lépésre kénytelen: ha mindkét láb a talajon → 0 reward
+        # Ha legalább egy láb levegőben → +reward
+        # Megakadályozza a "shuffle" (csoszogó, talpak nem emelkednek) mozgásmintát
+        # cfrc_ext[body_id, 2] = z-irányú kontakt erő (>1N → talaj érintés)
+        air_time_reward = 0.0
+        if self._left_foot_id is not None and self.w_air_time > 0.0:
+            left_contact  = self.data.cfrc_ext[self._left_foot_id,  2] > 1.0
+            right_contact = self.data.cfrc_ext[self._right_foot_id, 2] > 1.0
+            # Jutalom: legalább egy láb levegőben ÉS a robot mozog (tracking reward pozitív)
+            # Ha álló/shuffle: mindkét láb talajon → 0
+            # Ha lépked: váltakozva levegőben → +reward
+            n_air = (not left_contact) + (not right_contact)  # 0, 1 vagy 2
+            # Csak akkor jutalmaz, ha a robot tényleg halad (tracking pozitív)
+            # Ez megakadályozza hogy a robot "levegőbe rúgjon" állva
+            if forward_component > 0:
+                air_time_reward = self.w_air_time * n_air
+
+        # 10. Régi gait timing reward (fázis-alapú) — kikapcsolva, curriculum-ra vár
         gait_reward = 0.0
         if self._left_foot_id is not None and self.w_gait > 0.0:
             phase = (self._episode_time % self._gait_period) / self._gait_period
@@ -313,7 +342,7 @@ class RoboshelfRetailNavEnv(gym.Env):
 
         total_reward = (forward_reward + dist_shaping + proximity_bonus
                         + healthy_reward + ctrl_cost + contact_cost
-                        + goal_bonus + fall_penalty + gait_reward)
+                        + goal_bonus + fall_penalty + air_time_reward + gait_reward)
 
         info = {
             "forward_reward": forward_reward,
@@ -324,6 +353,7 @@ class RoboshelfRetailNavEnv(gym.Env):
             "contact_cost": contact_cost,
             "goal_bonus": goal_bonus,
             "fall_penalty": fall_penalty,
+            "air_time_reward": air_time_reward,
             "gait_reward": gait_reward,
             "dist_to_target": dist_to_target,
             "dist_delta": dist_delta,
@@ -332,6 +362,16 @@ class RoboshelfRetailNavEnv(gym.Env):
         }
 
         return total_reward, info
+
+    def _compute_final_dist_bonus(self, dist_to_target):
+        """Epizód végi egyszeri dist bonus (v14).
+
+        A per-lépés dist_shaping túl gyenge (0.002m/lép → semmi).
+        Epizód végén egyszer: w_dist_final × (start_dist - final_dist)
+        Ha robot 0.5m-t ment: +100 bonus → erősebb mint az összes tracking reward.
+        """
+        dist_improvement = self._start_dist_to_target - dist_to_target
+        return self.w_dist_final * max(dist_improvement, 0.0)  # csak közeledésért!
 
     def reset(self, seed=None, options=None):
         """Környezet resetelése."""
@@ -395,6 +435,7 @@ class RoboshelfRetailNavEnv(gym.Env):
         self._prev_dist_to_target = np.linalg.norm(
             self.target_pos - self.data.body(self._torso_id).xpos[:2]
         )
+        self._start_dist_to_target = self._prev_dist_to_target  # v14: epizód végi dist bonus
         self._episode_time = 0.0  # Gait fázis időszámláló nullázása
         self._last_action = np.zeros(self.model.nu)  # ctrl cost inicializálás
 
@@ -420,15 +461,15 @@ class RoboshelfRetailNavEnv(gym.Env):
             raw_ctrl = self._default_ctrl + action * ACTION_SCALE
             self.data.ctrl[:] = np.clip(raw_ctrl, ctrl_range[:, 0], ctrl_range[:, 1])
 
-        # Fizikai szimuláció (1 sub-step — csökkentve 2-ről)
-        # v12b: 1 sub-step = leglelassabb fizika = robot legtovább stabil
-        # v11/v12 tanulság: 86 lépéses határ fizikai instabilitásból ered, nem reward döntésből
-        # 1 sub-step → timestep hatása felére csökken → más mozgásmintát tanul a policy
-        for _ in range(1):
+        # Fizikai szimuláció (2 sub-step)
+        # v13 tanulság: sub-step=1 → tracking reward negatív lesz (cvel kisebb/más irányú)
+        # A v11-es policy 2 sub-step fizikán tanult és jól működött (+133 reward)
+        # → Visszaállítás 2 sub-stepre
+        for _ in range(2):
             mujoco.mj_step(self.model, self.data)
 
         # Gait időszámláló léptetése
-        self._episode_time += 1 * self.model.opt.timestep
+        self._episode_time += 2 * self.model.opt.timestep
 
         # Observation
         obs = self._get_obs()
@@ -441,6 +482,19 @@ class RoboshelfRetailNavEnv(gym.Env):
 
         # Truncated: max lépésszám (Gymnasium kezeli)
         truncated = False
+
+        # v14: Epizód végi dist bonus — termináláskor EGYSZER hozzáadjuk
+        # Ez a per-lépés dist_shaping hiányát pótolja (matematikailag domináns jel)
+        # truncated esetén is adjuk (max_episode_steps elért = sikeres hosszú ep)
+        if terminated or truncated:
+            dist_to_target = info["dist_to_target"]
+            final_bonus = self._compute_final_dist_bonus(dist_to_target)
+            reward += final_bonus
+            info["final_dist_bonus"] = final_bonus
+            info["dist_improvement"] = self._start_dist_to_target - dist_to_target
+        else:
+            info["final_dist_bonus"] = 0.0
+            info["dist_improvement"] = 0.0
 
         return obs, reward, terminated, truncated, info
 
