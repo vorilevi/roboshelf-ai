@@ -274,8 +274,10 @@ LEVELS = {
         #   - Ha 86 lép alatt 0.5m közel: +100 bonus (= 1.16/lép ekvivalens) → DOMINÁNS
         #   - Ha helyben marad: +0 → nagy különbség a navigáló és nem-navigáló policy között
         #   - sub-step=2 visszaállítva (tracking működik 2 sub-stepnél)
-        #   - Finetune a v11/v12b modellből: tracking reward már jól működik
-        # Várható: a robot ERŐSEN motivált lesz közeledni → dist_to_target <2.5m
+        # Eredmény: 16M lépésnél reward=0.2, de robot 3.18m-nél maradt (12cm haladás!)
+        # Diagnózis: lokális optimum — álló robot per-lépés reward +0.154 (pozitív!)
+        #            stuck-detection hiánya → 85 lépésen át "biztonságos" az állás
+        # → v15 megoldja ezt
         "total_timesteps": 10_000_000,
         "n_steps": 2048,
         "batch_size": 512,
@@ -283,7 +285,38 @@ LEVELS = {
         "n_envs": 4,
         "learning_rate": 3e-4,
         "clip_range": 0.2,
-        "description": "M2 CPU ~1 óra (v14 FRESH: ep-végi dist bonus w=200, sub-step=2)",
+        "description": "ARCHIVÁLT - v14: ep-végi dist bonus, de lokális optimum (álló robot) → v15",
+    },
+    "m2_10m_v15": {
+        # v15: Velocity tracking Gaussian + Stuck-detection + air_time fix
+        #
+        # Diagnózis (v14): robot 85 lépésen át áll, alig mozdul (3.18m táv)
+        #   Probléma 1: álló robot per-lépés reward ≈ +0.154 (pozitív!) → állás kifizetődő
+        #   Probléma 2: air_time jutalom: if forward_component > 0 → tyúk-tojás csapda
+        #
+        # v15 megoldások (szakirodalmi alapon):
+        #   1. Velocity tracking Gaussian: exp(-(v_cmd - v_actual)² / sigma) × w_vel
+        #      - DeepMind MJX sztenderd: sigma=0.25, v_cmd=1.0 m/s
+        #      - Álló robot: exp(-1/0.25)×3.0 ≈ 0.054 (≠ 0! negatív gradiens az állásra)
+        #      - 1 m/s: 3.0 (max) → egyértelmű motiváció mozgásra
+        #   2. Stuck-detection: ha 75 lépésen át v < 0.15 m/s → terminál + -15 büntetés
+        #      - Ref: szakirodalom 1.5s időablak (1.5s × 50Hz = 75 lépés)
+        #      - Az "állj és ne ess el" lokális optimum garantált halál 75 lépésen belül
+        #   3. air_time feltétel javítva: forward_component > 0 feltétel ELTÁVOLÍTVA
+        #      - A lábak emelése jutalmaz feltétel nélkül
+        #      - A mozgás megelőzheti az előrehaladást (nem feltétele)
+        #
+        # Várható reward egyensúly:
+        #   Álló (stuck, 75 lép): -18.64 ← rosszabb a v14 álló stratégiájánál!
+        #   Mozgó (85 lép, 1m/s): +353.87 ← egyértelmű nyerő
+        "total_timesteps": 10_000_000,
+        "n_steps": 2048,
+        "batch_size": 512,
+        "n_epochs": 10,
+        "n_envs": 4,
+        "learning_rate": 3e-4,
+        "clip_range": 0.2,
+        "description": "M2 CPU ~1 óra (v15 FRESH: vel tracking Gaussian + stuck detection + air_time fix)",
     },
     "m2_5m_v9": {
         # v9: tracking reward (sebesség × célirány), w_healthy=0.05, w_forward=8.0

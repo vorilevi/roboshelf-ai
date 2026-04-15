@@ -1,7 +1,7 @@
 # Roboshelf AI — Session Kontextus
 
 > Ezt a fájlt az AI olvassa, hogy gyorsan felvegye a fonalat.
-> Utoljára frissítve: 2026-04-12 (v11 áttörés + finetune: reward=+133.6, ep=83)
+> Utoljára frissítve: 2026-04-15 (v15 env kész, fresh start következik)
 
 ---
 
@@ -83,31 +83,26 @@ polcokat feltölteni. Végcél: befektetői demo. 5 fázis.
 
 ## Ami éppen fut
 
-**KÉSZ** — Legutóbbi finetune befejezve (2026-04-12):
-- `python src/training/roboshelf_phase2_finetune.py --steps 10000000 --lr 5e-5 --clip 0.1`
-- Eredmény: reward=+133.6, ±12.9 std, ep hossz=83
-- Az eval görbe még emelkedik (nem érte el a plafont)
+**KÉSZ** — v15 env + train script megírva (2026-04-15):
+- `src/envs/roboshelf_retail_nav_env.py` → v15 reward struktúra
+- `src/training/roboshelf_phase2_train.py` → `m2_10m_v15` szint hozzáadva
 
-**Kaggle T4** — leállítva (n_envs=8 hiba + GPU kihasználtság korlátai)
+**Legutóbbi finetune eredménye (2026-04-15):**
+- `python src/training/roboshelf_phase2_finetune.py --steps 10000000 --lr 5e-5 --clip 0.1`
+- Eredmény: reward=3.7 (±28.5), ep=85, **táv=3.18m** (12cm haladás csak!)
+- Diagnózis: lokális optimum — álló robot per-lépés reward +0.154 (pozitív volt!)
 
 ---
 
 ## Következő teendők (prioritás sorrendben)
 
-1. **GitHub push** — commitelni kell Mac terminálból:
+1. **GitHub push + v15 fresh start** — Mac terminálból:
    ```bash
    cd ~/roboshelf-ai-dev/roboshelf-ai
-   git add -A && git commit -m "v11 áttörés: reset noise fix, reward=+133.6, ep=83 (20M lépés)" && git push
+   git add -A && git commit -m "v15: vel tracking Gaussian + stuck detection + air_time fix" && git push
+   python src/training/roboshelf_phase2_train.py --level m2_10m_v15
    ```
-2. **v14 fresh start indítása** (sub-step=2 visszaállítva + epizód végi dist bonus):
-   ```bash
-   cd ~/roboshelf-ai-dev/roboshelf-ai
-   git add -A && git commit -m "v14: ep-végi dist bonus w=200, sub-step=2 visszaállítva" && git push
-   python src/training/roboshelf_phase2_train.py --level m2_10m_v14
-   ```
-   **Várható:** ep-végi +100 bonus közeledésért → 140+ extra reward a navigálónak → robot megtanul közeledni
-3. **Ep hossz vizsgálata** — miért terminál 83 lépésnél? Diagnosztizálni kell.
-4. **Fázis 3 tanítóscript megírása** — `src/envs/roboshelf_manipulation_env.py` már megvan,
+2. **Fázis 3 tanítóscript megírása** — `src/envs/roboshelf_manipulation_env.py` már megvan,
    csak a `src/training/roboshelf_phase3_train.py` hiányzik
 
 ---
@@ -163,6 +158,8 @@ roboshelf-results/phase2/logs/             ← TensorBoard logok + evaluations.n
 | ~21M  | -121.3      | 83       | v12 finetune — catastrophic forgetting! (w_forward 8→4 scale shift) |
 | ~22M  | +94.8       | 86       | v12b finetune — visszaállt, de 86 lépéses fizikai határ megmarad |
 | 10M   | -330.9      | 169      | v13 fresh (sub-step=1) — cvel skála megváltozott → tracking negatív |
+| 10M   | -44.1       | 85       | v14 fresh (ep-végi dist bonus + air_time) — eval görbe: 2M→-302, 10M→-45 (emelkedik!) |
+| 16M   | +3.7        | 85       | v14 finetune (+6M, lr=5e-5) — **lokális optimum: robot áll, táv=3.18m (12cm haladás!)** |
 
 **KRITIKUS ÁTTÖRÉS (v11):** A reset noise_scale=0.01 bevezetése törte át a determinisztikus ±0.0 std falat. A policy most általánosít, nem ragad lokális optimumba.
 **Áttörés (korábbi):** 7.8M lépésnél a reward pozitívba fordult (+42) és az ep hossz áttörte a 43 lépéses plafont (50 lépés).
@@ -197,7 +194,10 @@ roboshelf-results/phase2/logs/             ← TensorBoard logok + evaluations.n
 - **Catastrophic forgetting (MEGOLDVA v12b-ben)**: Reward komponens súly csökkentése (w_forward 8→4) finetune során → VecNormalize stat eltolódás → policy összeomlás (+133→-121). Fix: additív reward shaping (nem cserélni, hanem hozzáadni).
 - **Finetune vs fresh start**: Ha egy policy "beégett" mozgásmintán ragad, finetune nem tudja felülírni. Fresh start szükséges az architektúrális változásokhoz (pl. sub-step szám).
 - **Sub-step**: 2→1 (v13-ban). Lassabb fizika → robot tovább stabil → más mozgásmintát tanul a policy.
-- **v12b reward súlyok (aktuális)**: w_forward=8.0, w_dist=8.0 (potential-based, ÚJ), w_proximity=2.0 (3.5m küszöb, ÚJ), w_healthy=0.05, w_ctrl=-0.001, w_contact=-0.0001, w_fall=-20.0, w_gait=0.0
+- **v15 reward súlyok (AKTUÁLIS)**: w_vel=3.0 (Gaussian vel tracking, sigma=0.25, v_cmd=1.0), w_dist=2.0 (PBRS), w_proximity=2.0, w_healthy=0.05, w_ctrl=-0.001, w_contact=-0.0001, w_fall=-20.0, w_stuck=-15.0, w_gait=0.0
+- **v15 stuck-detection**: 75 lépéses csúszóablak, v < 0.15 m/s → terminál + w_stuck büntetés
+- **v15 air_time fix**: forward_component > 0 feltétel eltávolítva (tyúk-tojás csapda volt)
+- **v12b reward súlyok (archivált)**: w_forward=8.0, w_dist=8.0 (potential-based, ÚJ), w_proximity=2.0 (3.5m küszöb, ÚJ), w_healthy=0.05, w_ctrl=-0.001, w_contact=-0.0001, w_fall=-20.0, w_gait=0.0
 - **Tracking reward (v11+)**: `w_forward × dot(lin_vel[:2], direction_to_target)` — sebesség × célirány. Jobb mint y_velocity, mert minden irányban jutalmazza a haladást.
 - **Env reward súlyok (jelenlegi v12)**:
   - `w_forward=4.0` (tracking: vel × dir, csökkentve 8→4)

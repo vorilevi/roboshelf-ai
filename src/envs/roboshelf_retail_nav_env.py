@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Roboshelf AI — Fázis 2: G1 lokomóció a retail boltban
+Roboshelf AI — Fázis 2: G1 lokomóció a retail boltban (v15)
 
 Gymnasium wrapper a Unitree G1 navigációjához a kiskereskedelmi környezetben.
 A robot megtanulja a boltban való járást: egyensúly, akadálykerülés, célnavigáció.
@@ -76,37 +76,49 @@ class RoboshelfRetailNavEnv(gym.Env):
         self.target_pos = np.array([0.0, 3.8])  # Raktár pozíció (x, y)
         self.start_pos = np.array([0.0, 0.5])   # Robot start (x, y)
 
-        # --- Reward súlyok (v14: epizód végi dist bonus — az igazi navigációs jel) ---
-        # v13 tanulság: sub-step=1 → cvel más skálán → tracking negatív → összeomlik
-        #               sub-step=2 visszaállítva
-        # v12b tanulság: per-lépés dist_shaping GYENGE (0.002m/lép × w_dist = semmi)
-        #               Math: 0.5 m/s × 0.004s = 0.002m/lép → még w_dist=500-zal is 1/lép
+        # --- Reward súlyok (v15) ---
+        # v14 diagnózis: robot helyben áll, per-lépés reward ≈ +0.154 (állva is pozitív!)
+        # Lokális optimum: 85 lépésen át állni > mozogni és hamarabb esni
         #
-        # MEGOLDÁS: epizód VÉGI egyszeri dist bonus (termináláskor vagy truncation-kor)
-        #   w_dist_final=200 × (start_dist - final_dist):
-        #   - Ha 86 lépés alatt 0.5m-t megy: +200×0.5 = +100 bonus (= 1.16/lépés ekvivalens)
-        #   - Ez ERŐSEBB mint a tracking reward → DOMINÁL a navigáció
-        #   - Per-lépés dist shaping lecsökkentve (vestigial, stabilizáló hatás)
+        # v15 három változtatása:
+        #   1. Velocity tracking (Gaussian): álló robot negatív jelet kap, nem nullát
+        #      Formula: exp(-error² / sigma) × w_vel, ahol error = v_cmd - v_actual
+        #      Ref: DeepMind MJX, legged_gym — sigma=0.25 bevált érték
+        #   2. Stuck-detection korai terminálás: ha robot 1.5mp-ig áll (v < 0.15 m/s) → vége
+        #      Ref: szakirodalom 1.5-2s időablakot javasol; 50Hz → 75 lépés
+        #   3. air_time feltétel javítása: forward_component > 0 feltétel eltávolítva
+        #      Tyúk-tojás csapda: a robot épp azért nem halad, mert nem emel lábat
         #
-        # Kulcsszámok:
-        #   - Ha robot 3.3m-nél marad: +0 dist bonus
-        #   - Ha 2.5m-re megy (0.8m): +200×0.8 = +160 bonus az epizód végén
-        #   - Ha célba ér (0m): +200×3.3 = +660 → erős végső motiváció
-        self.w_forward = 8.0         # Sebesség × célirány — VÁLTOZATLAN (v11 bevált érték)
-        self.w_dist = 2.0            # Per-lépés potential shaping (kis súly, csak stabilizál)
-        self.w_dist_final = 200.0    # Epizód VÉGI egyszeri dist bonus [ÚJ v14!]
-        self.w_proximity = 2.0       # Proximity bonus 3.5m küszöbön — marad
-        self.w_air_time = 1.0        # Feet air time jutalom [ÚJ v14!]
-                                     # legged_gym/Isaac Gym konvenció: valódi lépést jutalmaz
-                                     # cfrc_ext[foot,2]<=0 → levegőben → +reward
-                                     # Megakadályozza a "shuffle" (csoszogó) mozgásmintát
-        self.w_healthy = 0.05        # Minimális alive bonus (MÁR 100×-os csökkentés v4-hez képest)
-                                     # Annealing NEM szükséges: 0.05×86=4.15 = 2.7% a total rewardnak
-        self.w_ctrl = -0.001         # Kontroll költség — VÁLTOZATLAN
-        self.w_contact = -0.0001     # Kontakt költség — VÁLTOZATLAN
-        self.w_goal = 100.0          # Célba érkezés bonus — VÁLTOZATLAN
-        self.w_fall = -20.0          # Esés büntetés — VÁLTOZATLAN
+        # Per-lépés reward egyensúly álló robotnál (v15):
+        #   vel_tracking ≈ exp(-1²/0.25) × 3.0 ≈ 3.0 × 0.018 ≈ +0.054 (≪ v14 +0.154!)
+        #   proximity     ≈ +0.109 (változatlan)
+        #   healthy        = +0.05
+        #   ─────────────────────────────────────────────
+        #   Összesen ≈ +0.21 HELYETT ≈ +0.21 ... de stuck → terminál 75 lépésnél!
+        #   → 75 × 0.21 + (-20 fall) + (-15 stuck) = -19.25  ← rosszabb mint mozogni!
+
+        self.w_vel = 3.0             # Velocity tracking Gaussian jutalom [ÚJ v15]
+                                     # Álló: exp(-1/0.25)×3≈0.054 | 1m/s: 3.0 (max)
+        self.vel_sigma = 0.25        # Gaussian sigma (DeepMind MJX sztenderd)
+        self.vel_cmd = 1.0           # Kívánt haladási sebesség [m/s]
+        self.w_dist = 2.0            # Per-lépés PBRS (Ng et al. 1999) — stabilizáló hatás
+        self.w_dist_final = 200.0    # Epizód VÉGI dist bonus (v14-ből marad)
+        self.w_proximity = 2.0       # Proximity bonus 3.5m küszöbön
+        self.w_air_time = 1.0        # Feet air time — feltétel javítva! (v15)
+        self.w_healthy = 0.05        # Minimális alive bonus
+        self.w_ctrl = -0.001         # Kontroll költség
+        self.w_contact = -0.0001     # Kontakt költség
+        self.w_goal = 100.0          # Célba érkezés bonus
+        self.w_fall = -20.0          # Esés büntetés
+        self.w_stuck = -15.0         # Stuck terminálás büntetése [ÚJ v15]
         self.w_gait = 0.0            # Kikapcsolva (curriculum)
+
+        # --- Stuck-detection paraméterek [ÚJ v15] ---
+        # Ha átlagsebesség < vel_stuck_threshold az utóbbi stuck_window lépésben → terminál
+        # Ref: 1.5s × 50Hz = 75 lépés; küszöb 0.15 m/s (szakirodalom: 0.15-0.2)
+        self.vel_stuck_threshold = 0.15  # m/s — ez alatt "beragadt"
+        self.stuck_window = 75           # lépés (~1.5s @ 50Hz)
+        self._vel_history = []           # csúszóablak a sebesség-előzményhez
 
         # --- Gait paraméterek (ciklikus lépésminta) ---
         # 0.8s periódus = 1.25 lépés/mp, 50% offset = szimmetrikus bal-jobb váltás
@@ -257,76 +269,69 @@ class RoboshelfRetailNavEnv(gym.Env):
         return self._healthy_z_range[0] < torso_z < self._healthy_z_range[1]
 
     def _compute_reward(self):
-        """Kiszámítja a reward-ot (v12: navigation-centrikus shaping)."""
+        """Kiszámítja a reward-ot (v15: velocity tracking + stuck detection + air_time fix)."""
         robot_xy = self.data.body(self._torso_id).xpos[:2]
         dist_to_target = np.linalg.norm(self.target_pos - robot_xy)
 
-        # 1. Sebesség-alapú tracking reward (v11-ből marad, kisebb súllyal)
-        # A robot sebességének a cél irányába eső komponensét jutalmazzuk
+        # Cél irány és tényleges sebesség
         direction_to_target = self.target_pos - robot_xy
         dist_norm = np.linalg.norm(direction_to_target) + 1e-6
-        dir_unit = direction_to_target / dist_norm  # unit vector
+        dir_unit = direction_to_target / dist_norm
         lin_vel = self.data.body(self._torso_id).cvel[3:5]  # cvel[3,4] = lin_x, lin_y
-        forward_component = np.dot(lin_vel, dir_unit)
-        forward_reward = self.w_forward * forward_component
+        forward_component = np.dot(lin_vel, dir_unit)  # cél irányú sebesség [m/s]
 
-        # 2. Potential-based distance shaping (ÚJ v12)
-        # Ng et al. 1999: F(s,s') = γ·Φ(s') - Φ(s), ahol Φ(s) = -dist (közelebb = nagyobb potenciál)
-        # Egyszerűsítve: (prev_dist - curr_dist) × w_dist
-        # Garantálja: közeledés → pozitív, távolodás → negatív, reset-en nulla
-        # Nem torzítja az optimális policy-t (ellentétben a direkt dist penalty-vel)
-        dist_delta = (self._prev_dist_to_target - dist_to_target)  # pozitív ha közelebb
+        # 1. Velocity tracking — Gaussian jutalom (v15, DeepMind MJX sztenderd)
+        # Formula: w_vel × exp(-(v_cmd - v_actual)² / sigma)
+        # Álló robot (v=0): exp(-1²/0.25) × 3.0 ≈ 0.054 (majdnem nulla!)
+        # 1 m/s robot:      exp(-0²/0.25) × 3.0 = 3.0   (maximális)
+        # 0.5 m/s robot:    exp(-0.25/0.25) × 3.0 ≈ 1.1 (közepes)
+        # FONTOS: ez felváltja a régi w_forward × forward_component tracking-et
+        vel_error = self.vel_cmd - forward_component
+        vel_tracking = self.w_vel * np.exp(-(vel_error ** 2) / self.vel_sigma)
+
+        # 2. Potential-based distance shaping (Ng et al. 1999)
+        # F(s,s') = γ·Φ(s') - Φ(s), Φ(s) = -dist → közeledés pozitív
+        # Stabilizáló hatás, kis súly (v14-ből marad)
+        dist_delta = (self._prev_dist_to_target - dist_to_target)
         dist_shaping = self.w_dist * dist_delta
         self._prev_dist_to_target = dist_to_target
 
-        # 3. Proximity bonus (v12b: küszöb 3.5m → azonnal aktív!)
-        # v12 hiba: 2.0m küszöb soha nem aktiválódott (robot 3.22m-en maradt)
-        # v12b javítás: 3.5m küszöb → az epizód ELSŐ lépésétől aktív jutalom
-        # Start: 3.3m → kis pozitív bonus. Cél (0m): w_proximity
-        # Lineáris skálázás: minél közelebb, annál több
-        PROXIMITY_THRESHOLD = 3.5  # méter — start=3.3m tehát AZONNAL aktív
+        # 3. Proximity bonus (lineáris, 3.5m küszöb — azonnal aktív a 3.3m-es starttól)
+        PROXIMITY_THRESHOLD = 3.5
         proximity_bonus = 0.0
         if dist_to_target < PROXIMITY_THRESHOLD:
-            # Lineáris: 3.5m → 0.0, 0.0m → w_proximity
             proximity_bonus = self.w_proximity * (PROXIMITY_THRESHOLD - dist_to_target) / PROXIMITY_THRESHOLD
 
-        # 4. Egyensúly jutalom
+        # 4. Egyensúly jutalom (minimális alive bonus)
         healthy_reward = self.w_healthy if self._is_healthy() else 0.0
 
-        # 5. Kontroll költség — az AKCIÓRA számítva (action²)
+        # 5. Kontroll költség
         ctrl_cost = self.w_ctrl * np.sum(np.square(self._last_action))
 
-        # 6. Kontakt költség (ütközések büntetése)
+        # 6. Kontakt költség
         contact_forces = self.data.cfrc_ext.flat.copy()
         contact_cost = self.w_contact * np.sum(np.square(contact_forces))
 
-        # 7. Cél bonus (ha elérte a raktárt, 0.5m-en belül)
+        # 7. Cél bonus
         goal_bonus = 0.0
         if dist_to_target < 0.5:
             goal_bonus = self.w_goal
 
-        # 8. Esés büntetés: csak termináláskor, egyszer
+        # 8. Esés büntetés (termináláskor egyszer)
         fall_penalty = self.w_fall if not self._is_healthy() else 0.0
 
-        # 9. Feet air time jutalom (ÚJ v14 — legged_gym/Isaac Gym konvenció)
-        # A robot valódi lépésre kénytelen: ha mindkét láb a talajon → 0 reward
-        # Ha legalább egy láb levegőben → +reward
-        # Megakadályozza a "shuffle" (csoszogó, talpak nem emelkednek) mozgásmintát
-        # cfrc_ext[body_id, 2] = z-irányú kontakt erő (>1N → talaj érintés)
+        # 9. Feet air time jutalom (v15: forward_component feltétel ELTÁVOLÍTVA!)
+        # v14 hiba: if forward_component > 0 → tyúk-tojás probléma
+        # (robot épp azért nem halad, mert nem emel lábat; de jutalom csak ha halad)
+        # v15 fix: mindig jutalmaz lábemelésnél → a mozgás MEGELŐZHETI a haladást
         air_time_reward = 0.0
         if self._left_foot_id is not None and self.w_air_time > 0.0:
             left_contact  = self.data.cfrc_ext[self._left_foot_id,  2] > 1.0
             right_contact = self.data.cfrc_ext[self._right_foot_id, 2] > 1.0
-            # Jutalom: legalább egy láb levegőben ÉS a robot mozog (tracking reward pozitív)
-            # Ha álló/shuffle: mindkét láb talajon → 0
-            # Ha lépked: váltakozva levegőben → +reward
             n_air = (not left_contact) + (not right_contact)  # 0, 1 vagy 2
-            # Csak akkor jutalmaz, ha a robot tényleg halad (tracking pozitív)
-            # Ez megakadályozza hogy a robot "levegőbe rúgjon" állva
-            if forward_component > 0:
-                air_time_reward = self.w_air_time * n_air
+            air_time_reward = self.w_air_time * n_air
 
-        # 10. Régi gait timing reward (fázis-alapú) — kikapcsolva, curriculum-ra vár
+        # 10. Gait timing reward — kikapcsolva (curriculum)
         gait_reward = 0.0
         if self._left_foot_id is not None and self.w_gait > 0.0:
             phase = (self._episode_time % self._gait_period) / self._gait_period
@@ -340,12 +345,13 @@ class RoboshelfRetailNavEnv(gym.Env):
             right_match = not (right_contact ^ right_should_contact)
             gait_reward = self.w_gait * (float(left_match) + float(right_match))
 
-        total_reward = (forward_reward + dist_shaping + proximity_bonus
+        total_reward = (vel_tracking + dist_shaping + proximity_bonus
                         + healthy_reward + ctrl_cost + contact_cost
                         + goal_bonus + fall_penalty + air_time_reward + gait_reward)
 
         info = {
-            "forward_reward": forward_reward,
+            "vel_tracking": vel_tracking,
+            "forward_component": forward_component,
             "dist_shaping": dist_shaping,
             "proximity_bonus": proximity_bonus,
             "healthy_reward": healthy_reward,
@@ -435,9 +441,10 @@ class RoboshelfRetailNavEnv(gym.Env):
         self._prev_dist_to_target = np.linalg.norm(
             self.target_pos - self.data.body(self._torso_id).xpos[:2]
         )
-        self._start_dist_to_target = self._prev_dist_to_target  # v14: epizód végi dist bonus
+        self._start_dist_to_target = self._prev_dist_to_target  # epizód végi dist bonus
         self._episode_time = 0.0  # Gait fázis időszámláló nullázása
         self._last_action = np.zeros(self.model.nu)  # ctrl cost inicializálás
+        self._vel_history = []  # v15: stuck-detection előzmény nullázása
 
         obs = self._get_obs()
         info = {"dist_to_target": self._prev_dist_to_target}
@@ -480,21 +487,41 @@ class RoboshelfRetailNavEnv(gym.Env):
         # Terminated: robot elesett
         terminated = not self._is_healthy()
 
+        # v15: Stuck-detection — ha robot 1.5mp-ig áll (v < 0.15 m/s) → terminál
+        # Csúszóablak a cél irányú sebességre (forward_component)
+        forward_component = info["forward_component"]
+        self._vel_history.append(abs(forward_component))
+        if len(self._vel_history) > self.stuck_window:
+            self._vel_history.pop(0)
+
+        stuck = False
+        if (len(self._vel_history) == self.stuck_window
+                and np.mean(self._vel_history) < self.vel_stuck_threshold):
+            stuck = True
+            terminated = True  # korai terminálás
+
         # Truncated: max lépésszám (Gymnasium kezeli)
         truncated = False
 
-        # v14: Epizód végi dist bonus — termináláskor EGYSZER hozzáadjuk
-        # Ez a per-lépés dist_shaping hiányát pótolja (matematikailag domináns jel)
-        # truncated esetén is adjuk (max_episode_steps elért = sikeres hosszú ep)
+        # Epizód végi dist bonus (termináláskor vagy truncation-kor egyszer)
         if terminated or truncated:
             dist_to_target = info["dist_to_target"]
             final_bonus = self._compute_final_dist_bonus(dist_to_target)
             reward += final_bonus
             info["final_dist_bonus"] = final_bonus
             info["dist_improvement"] = self._start_dist_to_target - dist_to_target
+            # v15: stuck büntetés az esés penaltyn felül
+            if stuck and self._is_healthy():
+                reward += self.w_stuck
+                info["stuck_penalty"] = self.w_stuck
+            else:
+                info["stuck_penalty"] = 0.0
         else:
             info["final_dist_bonus"] = 0.0
             info["dist_improvement"] = 0.0
+            info["stuck_penalty"] = 0.0
+
+        info["stuck"] = stuck
 
         return obs, reward, terminated, truncated, info
 
