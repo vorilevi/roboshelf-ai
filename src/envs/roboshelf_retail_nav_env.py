@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Roboshelf AI — Fázis 2: G1 lokomóció a retail boltban (v15)
+Roboshelf AI — Fázis 2: G1 lokomóció a retail boltban (v16)
 
 Gymnasium wrapper a Unitree G1 navigációjához a kiskereskedelmi környezetben.
 A robot megtanulja a boltban való járást: egyensúly, akadálykerülés, célnavigáció.
@@ -76,49 +76,47 @@ class RoboshelfRetailNavEnv(gym.Env):
         self.target_pos = np.array([0.0, 3.8])  # Raktár pozíció (x, y)
         self.start_pos = np.array([0.0, 0.5])   # Robot start (x, y)
 
-        # --- Reward súlyok (v15) ---
-        # v14 diagnózis: robot helyben áll, per-lépés reward ≈ +0.154 (állva is pozitív!)
-        # Lokális optimum: 85 lépésen át állni > mozogni és hamarabb esni
+        # --- Reward súlyok (v16) ---
+        # v15 diagnózis: minden ep pontosan 75 lépésnél végzett → stuck-detection triggerelt
+        #   De: stuck_penalty=-15 < fall_penalty=-20 → állás még mindig "kifizetődőbb"
+        #   Ráadásul w_air_time=1.0 túl gyenge ahhoz, hogy a robot merjen lépni
         #
-        # v15 három változtatása:
-        #   1. Velocity tracking (Gaussian): álló robot negatív jelet kap, nem nullát
-        #      Formula: exp(-error² / sigma) × w_vel, ahol error = v_cmd - v_actual
-        #      Ref: DeepMind MJX, legged_gym — sigma=0.25 bevált érték
-        #   2. Stuck-detection korai terminálás: ha robot 1.5mp-ig áll (v < 0.15 m/s) → vége
-        #      Ref: szakirodalom 1.5-2s időablakot javasol; 50Hz → 75 lépés
-        #   3. air_time feltétel javítása: forward_component > 0 feltétel eltávolítva
-        #      Tyúk-tojás csapda: a robot épp azért nem halad, mert nem emel lábat
+        # v16 három változtatása:
+        #   1. w_stuck = -20 (= fall_penalty): álló nem jobb mint eső robot
+        #      Szándékos esés (29 lép): 29×0.22 + (-20) = -13.6 → nem éri meg
+        #   2. stuck_window = 40 lépés (~0.8s): gyorsabb beavatkozás
+        #      Álló 40 lép: 40×0.22 + (-20) = -11.3 → veszteséges
+        #   3. w_air_time = 3.0: erős azonnali jutalom lábemelésnél
+        #      Helyben járó (lábat emel, v≈0): +3.27/lép × 85 lép = +253 → kifizetődő!
+        #      Ez a "hiányzó láncszem": merjen lépni → tracking automatikusan előre húz
         #
-        # Per-lépés reward egyensúly álló robotnál (v15):
-        #   vel_tracking ≈ exp(-1²/0.25) × 3.0 ≈ 3.0 × 0.018 ≈ +0.054 (≪ v14 +0.154!)
-        #   proximity     ≈ +0.109 (változatlan)
-        #   healthy        = +0.05
-        #   ─────────────────────────────────────────────
-        #   Összesen ≈ +0.21 HELYETT ≈ +0.21 ... de stuck → terminál 75 lépésnél!
-        #   → 75 × 0.21 + (-20 fall) + (-15 stuck) = -19.25  ← rosszabb mint mozogni!
+        # Reward lépcsők (kalkulált):
+        #   Álló (40 lép, stuck):     -11.3  ← veszteséges
+        #   Szándékos esés (29 lép):  -13.7  ← nem jobb!
+        #   Helyben járó (85 lép):   +253.0  ← nagy ugrás
+        #   Mozgó 1m/s (85 lép):     +523.8  ← maximum
 
-        self.w_vel = 3.0             # Velocity tracking Gaussian jutalom [ÚJ v15]
-                                     # Álló: exp(-1/0.25)×3≈0.054 | 1m/s: 3.0 (max)
-        self.vel_sigma = 0.25        # Gaussian sigma (DeepMind MJX sztenderd)
+        self.w_vel = 3.0             # Velocity tracking Gaussian (DeepMind MJX sztenderd)
+        self.vel_sigma = 0.25        # Gaussian sigma
         self.vel_cmd = 1.0           # Kívánt haladási sebesség [m/s]
-        self.w_dist = 2.0            # Per-lépés PBRS (Ng et al. 1999) — stabilizáló hatás
-        self.w_dist_final = 200.0    # Epizód VÉGI dist bonus (v14-ből marad)
+        self.w_dist = 2.0            # Per-lépés PBRS (Ng et al. 1999)
+        self.w_dist_final = 200.0    # Epizód végi dist bonus
         self.w_proximity = 2.0       # Proximity bonus 3.5m küszöbön
-        self.w_air_time = 1.0        # Feet air time — feltétel javítva! (v15)
+        self.w_air_time = 3.0        # Feet air time [v16: 1.0→3.0, erős lépési motiváció]
         self.w_healthy = 0.05        # Minimális alive bonus
         self.w_ctrl = -0.001         # Kontroll költség
         self.w_contact = -0.0001     # Kontakt költség
         self.w_goal = 100.0          # Célba érkezés bonus
         self.w_fall = -20.0          # Esés büntetés
-        self.w_stuck = -15.0         # Stuck terminálás büntetése [ÚJ v15]
+        self.w_stuck = -20.0         # Stuck büntetés [v16: -15→-20, = fall_penalty!]
         self.w_gait = 0.0            # Kikapcsolva (curriculum)
 
-        # --- Stuck-detection paraméterek [ÚJ v15] ---
-        # Ha átlagsebesség < vel_stuck_threshold az utóbbi stuck_window lépésben → terminál
-        # Ref: 1.5s × 50Hz = 75 lépés; küszöb 0.15 m/s (szakirodalom: 0.15-0.2)
-        self.vel_stuck_threshold = 0.15  # m/s — ez alatt "beragadt"
-        self.stuck_window = 75           # lépés (~1.5s @ 50Hz)
-        self._vel_history = []           # csúszóablak a sebesség-előzményhez
+        # --- Stuck-detection paraméterek [v16: ablak 75→40] ---
+        # 40 lépés ≈ 0.8s @ 50Hz — elég gyors, de nem azonnali
+        # Küszöb 0.15 m/s változatlan (szakirodalom: 0.15-0.2)
+        self.vel_stuck_threshold = 0.15  # m/s
+        self.stuck_window = 40           # lépés [v16: 75→40]
+        self._vel_history = []
 
         # --- Gait paraméterek (ciklikus lépésminta) ---
         # 0.8s periódus = 1.25 lépés/mp, 50% offset = szimmetrikus bal-jobb váltás

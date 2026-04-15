@@ -1,7 +1,7 @@
 # Roboshelf AI — Session Kontextus
 
 > Ezt a fájlt az AI olvassa, hogy gyorsan felvegye a fonalat.
-> Utoljára frissítve: 2026-04-15 (v15 env kész, fresh start következik)
+> Utoljára frissítve: 2026-04-15 (v16 env kész, fresh start következik)
 
 ---
 
@@ -83,24 +83,24 @@ polcokat feltölteni. Végcél: befektetői demo. 5 fázis.
 
 ## Ami éppen fut
 
-**KÉSZ** — v15 env + train script megírva (2026-04-15):
-- `src/envs/roboshelf_retail_nav_env.py` → v15 reward struktúra
-- `src/training/roboshelf_phase2_train.py` → `m2_10m_v15` szint hozzáadva
+**KÉSZ** — v16 env + train script megírva (2026-04-15):
+- `src/envs/roboshelf_retail_nav_env.py` → v16: w_stuck=-20, stuck_window=40, w_air_time=3.0
+- `src/training/roboshelf_phase2_train.py` → `m2_10m_v16` szint hozzáadva
 
-**Legutóbbi finetune eredménye (2026-04-15):**
-- `python src/training/roboshelf_phase2_finetune.py --steps 10000000 --lr 5e-5 --clip 0.1`
-- Eredmény: reward=3.7 (±28.5), ep=85, **táv=3.18m** (12cm haladás csak!)
-- Diagnózis: lokális optimum — álló robot per-lépés reward +0.154 (pozitív volt!)
+**v15 fresh start eredménye (2026-04-15):**
+- `python src/training/roboshelf_phase2_train.py --level m2_10m_v15`
+- Eredmény: reward=-244.9 (±36.9), **ep=75 MINDEN futásnál** (stuck triggerelt!)
+- Diagnózis: w_stuck=-15 < w_fall=-20 → állás még kifizetődőbb; w_air_time=1.0 gyenge
 
 ---
 
 ## Következő teendők (prioritás sorrendben)
 
-1. **GitHub push + v15 fresh start** — Mac terminálból:
+1. **GitHub push + v16 fresh start** — Mac terminálból:
    ```bash
    cd ~/roboshelf-ai-dev/roboshelf-ai
-   git add -A && git commit -m "v15: vel tracking Gaussian + stuck detection + air_time fix" && git push
-   python src/training/roboshelf_phase2_train.py --level m2_10m_v15
+   git add -A && git commit -m "v16: w_stuck=-20, stuck_window=40, w_air_time=3.0" && git push
+   python src/training/roboshelf_phase2_train.py --level m2_10m_v16
    ```
 2. **Fázis 3 tanítóscript megírása** — `src/envs/roboshelf_manipulation_env.py` már megvan,
    csak a `src/training/roboshelf_phase3_train.py` hiányzik
@@ -160,6 +160,7 @@ roboshelf-results/phase2/logs/             ← TensorBoard logok + evaluations.n
 | 10M   | -330.9      | 169      | v13 fresh (sub-step=1) — cvel skála megváltozott → tracking negatív |
 | 10M   | -44.1       | 85       | v14 fresh (ep-végi dist bonus + air_time) — eval görbe: 2M→-302, 10M→-45 (emelkedik!) |
 | 16M   | +3.7        | 85       | v14 finetune (+6M, lr=5e-5) — **lokális optimum: robot áll, táv=3.18m (12cm haladás!)** |
+| 10M   | -244.9      | 75       | v15 fresh — stuck minden ep 75 lépésnél (w_stuck gyenge + air_time gyenge) |
 
 **KRITIKUS ÁTTÖRÉS (v11):** A reset noise_scale=0.01 bevezetése törte át a determinisztikus ±0.0 std falat. A policy most általánosít, nem ragad lokális optimumba.
 **Áttörés (korábbi):** 7.8M lépésnél a reward pozitívba fordult (+42) és az ep hossz áttörte a 43 lépéses plafont (50 lépés).
@@ -194,9 +195,9 @@ roboshelf-results/phase2/logs/             ← TensorBoard logok + evaluations.n
 - **Catastrophic forgetting (MEGOLDVA v12b-ben)**: Reward komponens súly csökkentése (w_forward 8→4) finetune során → VecNormalize stat eltolódás → policy összeomlás (+133→-121). Fix: additív reward shaping (nem cserélni, hanem hozzáadni).
 - **Finetune vs fresh start**: Ha egy policy "beégett" mozgásmintán ragad, finetune nem tudja felülírni. Fresh start szükséges az architektúrális változásokhoz (pl. sub-step szám).
 - **Sub-step**: 2→1 (v13-ban). Lassabb fizika → robot tovább stabil → más mozgásmintát tanul a policy.
-- **v15 reward súlyok (AKTUÁLIS)**: w_vel=3.0 (Gaussian vel tracking, sigma=0.25, v_cmd=1.0), w_dist=2.0 (PBRS), w_proximity=2.0, w_healthy=0.05, w_ctrl=-0.001, w_contact=-0.0001, w_fall=-20.0, w_stuck=-15.0, w_gait=0.0
-- **v15 stuck-detection**: 75 lépéses csúszóablak, v < 0.15 m/s → terminál + w_stuck büntetés
-- **v15 air_time fix**: forward_component > 0 feltétel eltávolítva (tyúk-tojás csapda volt)
+- **v16 reward súlyok (AKTUÁLIS)**: w_vel=3.0 (Gaussian, sigma=0.25, v_cmd=1.0), w_air_time=3.0, w_dist=2.0, w_proximity=2.0, w_healthy=0.05, w_ctrl=-0.001, w_contact=-0.0001, w_fall=-20.0, w_stuck=-20.0, w_gait=0.0
+- **v16 stuck-detection**: 40 lépéses ablak (~0.8s), v < 0.15 m/s → terminál + w_stuck=-20
+- **v15 reward súlyok (archivált)**: w_vel=3.0, w_air_time=1.0, w_stuck=-15.0, stuck_window=75
 - **v12b reward súlyok (archivált)**: w_forward=8.0, w_dist=8.0 (potential-based, ÚJ), w_proximity=2.0 (3.5m küszöb, ÚJ), w_healthy=0.05, w_ctrl=-0.001, w_contact=-0.0001, w_fall=-20.0, w_gait=0.0
 - **Tracking reward (v11+)**: `w_forward × dot(lin_vel[:2], direction_to_target)` — sebesség × célirány. Jobb mint y_velocity, mert minden irányban jutalmazza a haladást.
 - **Env reward súlyok (jelenlegi v12)**:

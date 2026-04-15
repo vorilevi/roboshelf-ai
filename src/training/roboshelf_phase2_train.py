@@ -289,26 +289,10 @@ LEVELS = {
     },
     "m2_10m_v15": {
         # v15: Velocity tracking Gaussian + Stuck-detection + air_time fix
-        #
-        # Diagnózis (v14): robot 85 lépésen át áll, alig mozdul (3.18m táv)
-        #   Probléma 1: álló robot per-lépés reward ≈ +0.154 (pozitív!) → állás kifizetődő
-        #   Probléma 2: air_time jutalom: if forward_component > 0 → tyúk-tojás csapda
-        #
-        # v15 megoldások (szakirodalmi alapon):
-        #   1. Velocity tracking Gaussian: exp(-(v_cmd - v_actual)² / sigma) × w_vel
-        #      - DeepMind MJX sztenderd: sigma=0.25, v_cmd=1.0 m/s
-        #      - Álló robot: exp(-1/0.25)×3.0 ≈ 0.054 (≠ 0! negatív gradiens az állásra)
-        #      - 1 m/s: 3.0 (max) → egyértelmű motiváció mozgásra
-        #   2. Stuck-detection: ha 75 lépésen át v < 0.15 m/s → terminál + -15 büntetés
-        #      - Ref: szakirodalom 1.5s időablak (1.5s × 50Hz = 75 lépés)
-        #      - Az "állj és ne ess el" lokális optimum garantált halál 75 lépésen belül
-        #   3. air_time feltétel javítva: forward_component > 0 feltétel ELTÁVOLÍTVA
-        #      - A lábak emelése jutalmaz feltétel nélkül
-        #      - A mozgás megelőzheti az előrehaladást (nem feltétele)
-        #
-        # Várható reward egyensúly:
-        #   Álló (stuck, 75 lép): -18.64 ← rosszabb a v14 álló stratégiájánál!
-        #   Mozgó (85 lép, 1m/s): +353.87 ← egyértelmű nyerő
+        # Eredmény: MINDEN ep 75 lépésnél végzett → stuck triggerelt, de lokális optimum maradt
+        #   w_stuck=-15 < w_fall=-20 → álló stratégia még mindig kevésbé rossz
+        #   w_air_time=1.0 túl gyenge → robot nem merte felemelni a lábát
+        # → v16 megoldja: w_stuck=-20, stuck_window=40, w_air_time=3.0
         "total_timesteps": 10_000_000,
         "n_steps": 2048,
         "batch_size": 512,
@@ -316,7 +300,37 @@ LEVELS = {
         "n_envs": 4,
         "learning_rate": 3e-4,
         "clip_range": 0.2,
-        "description": "M2 CPU ~1 óra (v15 FRESH: vel tracking Gaussian + stuck detection + air_time fix)",
+        "description": "ARCHIVÁLT - v15: stuck minden 75 lépésnél (w_stuck gyenge, air_time gyenge) → v16",
+    },
+    "m2_10m_v16": {
+        # v16: Stuck büntetés = fall büntetés + rövidebb ablak + erős air_time
+        #
+        # Diagnózis (v15): ep=75 lépés minden futásnál (stuck triggerelt, de nem elég)
+        #   w_stuck=-15 < w_fall=-20 → robot preferálta az állást az esésnél
+        #   w_air_time=1.0 → nem volt elég motiváció lábat emelni
+        #
+        # v16 változtatások:
+        #   1. w_stuck = -20 (= w_fall): állás és esés egyenértékű végzetes hiba
+        #      Szándékos esés (29 lép): 29×0.22 + (-20) = -13.6 → nem éri meg
+        #   2. stuck_window = 40 lépés (~0.8s): gyorsabb beavatkozás (v15: 75 lép)
+        #      Álló (40 lép): 40×0.22 + (-20) = -11.3 → veszteséges
+        #   3. w_air_time = 3.0: erős jutalom lábemelésnél (v15: 1.0)
+        #      Helyben járó: +3.27/lép × 85 lép = +253 → kifizetődő!
+        #      "Hiányzó láncszem": merjen lépni → tracking előre húzza
+        #
+        # Reward lépcsők:
+        #   Álló (40 lép):         -11.3
+        #   Szándékos esés:        -13.7  ← nem jobb!
+        #   Helyben járó (85 lép): +253.0  ← nagy ugrás
+        #   Mozgó 1m/s (85 lép):  +523.8  ← maximum
+        "total_timesteps": 10_000_000,
+        "n_steps": 2048,
+        "batch_size": 512,
+        "n_epochs": 10,
+        "n_envs": 4,
+        "learning_rate": 3e-4,
+        "clip_range": 0.2,
+        "description": "M2 CPU ~1 óra (v16 FRESH: w_stuck=-20, stuck_window=40, w_air_time=3.0)",
     },
     "m2_5m_v9": {
         # v9: tracking reward (sebesség × célirány), w_healthy=0.05, w_forward=8.0
@@ -550,7 +564,6 @@ def train(args):
     ev.close()
 
     print(f"\n  ✅ Fájlok elmentve: {OUTPUT_DIR}")
-    print(f"  Letöltés Kaggle-ből: Output fül → roboshelf-phase2-results/")
 
 
 if __name__ == "__main__":
