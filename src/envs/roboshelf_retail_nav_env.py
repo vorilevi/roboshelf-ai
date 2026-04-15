@@ -76,46 +76,51 @@ class RoboshelfRetailNavEnv(gym.Env):
         self.target_pos = np.array([0.0, 3.8])  # Raktár pozíció (x, y)
         self.start_pos = np.array([0.0, 0.5])   # Robot start (x, y)
 
-        # --- Reward súlyok (v16) ---
-        # v15 diagnózis: minden ep pontosan 75 lépésnél végzett → stuck-detection triggerelt
-        #   De: stuck_penalty=-15 < fall_penalty=-20 → állás még mindig "kifizetődőbb"
-        #   Ráadásul w_air_time=1.0 túl gyenge ahhoz, hogy a robot merjen lépni
+        # --- Reward súlyok (v17) ---
+        # v16 diagnózis: ep=40 MINDEN futásnál → stuck-window méretét tanulja meg, nem a járást
+        #   Alapprobléma: stuck-detection a szimptómát bünteti, nem az okot
+        #   A PPO mindig megtalálja az ablak méretét és arra optimalizál
         #
-        # v16 három változtatása:
-        #   1. w_stuck = -20 (= fall_penalty): álló nem jobb mint eső robot
-        #      Szándékos esés (29 lép): 29×0.22 + (-20) = -13.6 → nem éri meg
-        #   2. stuck_window = 40 lépés (~0.8s): gyorsabb beavatkozás
-        #      Álló 40 lép: 40×0.22 + (-20) = -11.3 → veszteséges
-        #   3. w_air_time = 3.0: erős azonnali jutalom lábemelésnél
-        #      Helyben járó (lábat emel, v≈0): +3.27/lép × 85 lép = +253 → kifizetődő!
-        #      Ez a "hiányzó láncszem": merjen lépni → tracking automatikusan előre húz
-        #
-        # Reward lépcsők (kalkulált):
-        #   Álló (40 lép, stuck):     -11.3  ← veszteséges
-        #   Szándékos esés (29 lép):  -13.7  ← nem jobb!
-        #   Helyben járó (85 lép):   +253.0  ← nagy ugrás
-        #   Mozgó 1m/s (85 lép):     +523.8  ← maximum
+        # v17 megközelítés: Curriculum tanítás (ETH Zürich ANYmal, Unitree pipeline)
+        #   1. Felhajtóerő (buoyancy assist): Z-irányú külső erő a pelvis-en
+        #      - 0-3M lépés: gravitáció 60%-át ellensúlyozza (~206N felfelé)
+        #      - 3M-7M lépés: lineáris csökkentés 100%→0%
+        #      - 7M-10M lépés: 0% (teljes súly)
+        #      Hatás: robot nehezebben esik el → mer lábat emelni → tapasztalja az air_time jutalmat
+        #   2. Stuck-window annealing: CurriculumCallback frissíti a train scriptből
+        #      - 0-3M: stuck kikapcsolva (stuck_window=9999)
+        #      - 3M-7M: 200→40 lépés lineárisan
+        #      - 7M-10M: 40 lépés (fix)
+        #      Hatás: nem bünteti a lassú kezdeti tanulást, de a végén szigorú
+        #   3. w_air_time=3.0 marad (v16-ból, bevált erős motiváció)
+        #   4. Lineáris vel tracking visszaállítva (v11 bevált: w_forward × forward_component)
+        #      Gaussian (v15/v16) nem adott erős haladási gradienst
 
-        self.w_vel = 3.0             # Velocity tracking Gaussian (DeepMind MJX sztenderd)
-        self.vel_sigma = 0.25        # Gaussian sigma
-        self.vel_cmd = 1.0           # Kívánt haladási sebesség [m/s]
+        self.w_forward = 8.0         # Lineáris vel tracking (v11 bevált érték)
         self.w_dist = 2.0            # Per-lépés PBRS (Ng et al. 1999)
         self.w_dist_final = 200.0    # Epizód végi dist bonus
         self.w_proximity = 2.0       # Proximity bonus 3.5m küszöbön
-        self.w_air_time = 3.0        # Feet air time [v16: 1.0→3.0, erős lépési motiváció]
+        self.w_air_time = 3.0        # Feet air time (v16-ból: erős lépési motiváció)
         self.w_healthy = 0.05        # Minimális alive bonus
         self.w_ctrl = -0.001         # Kontroll költség
         self.w_contact = -0.0001     # Kontakt költség
         self.w_goal = 100.0          # Célba érkezés bonus
         self.w_fall = -20.0          # Esés büntetés
-        self.w_stuck = -20.0         # Stuck büntetés [v16: -15→-20, = fall_penalty!]
+        self.w_stuck = -20.0         # Stuck büntetés (= fall_penalty)
         self.w_gait = 0.0            # Kikapcsolva (curriculum)
 
-        # --- Stuck-detection paraméterek [v16: ablak 75→40] ---
-        # 40 lépés ≈ 0.8s @ 50Hz — elég gyors, de nem azonnali
-        # Küszöb 0.15 m/s változatlan (szakirodalom: 0.15-0.2)
-        self.vel_stuck_threshold = 0.15  # m/s
-        self.stuck_window = 40           # lépés [v16: 75→40]
+        # --- Curriculum paraméterek (CurriculumCallback frissíti) ---
+        # buoyancy_force: Z-irányú külső erő a pelvis-en [N], 0 = kikapcsolva
+        # stuck_window: CurriculumCallback írja felül lépésszám alapján
+        # G1 tömeg ~35 kg, g=9.81 → súly ≈ 343N
+        # FIGYELEM: G1 URDF tartalmazhat virtuális torzó linket is!
+        #   Ha csak a pelvis-re hat: 206N = 60% → biztonságos
+        #   Ha a MuJoCo mindkét torzóra szétosztja: 206N × 2 = 412N > súly → repül!
+        # Konzervatív beállítás: 103N (30%) — elég a kikönnyítéshez, nem repül fel
+        # Az első futásnál ellenőrizd: torso_z > 1.5m? → repül, csökkenteni kell
+        self.buoyancy_force = 103.0  # N (gravitáció 30%-a, konzervatív) — CurriculumCallback nullázza
+        self.vel_stuck_threshold = 0.15  # m/s — küszöb változatlan
+        self.stuck_window = 9999     # lépés — CurriculumCallback csökkenti (kezdetben: ki)
         self._vel_history = []
 
         # --- Gait paraméterek (ciklikus lépésminta) ---
@@ -198,7 +203,12 @@ class RoboshelfRetailNavEnv(gym.Env):
             # Fallback: első nem-world body
             self._torso_id = 1
 
+        # G1 teljes tömeg kiszámítása (összes body összege)
+        total_mass = sum(self.model.body_mass)
+        weight_N = total_mass * 9.81
         print(f"  ✅ Retail Nav env betöltve: {self.model.nbody} body, {self.model.nu} actuators")
+        print(f"  ℹ️  G1 teljes tömeg: {total_mass:.1f} kg, súly: {weight_N:.1f} N")
+        print(f"  ℹ️  Felhajtóerő: {self.buoyancy_force:.1f} N ({self.buoyancy_force/weight_N*100:.1f}% ellensúlyozva)")
 
         # Láb body indexek megkeresése (G1: ankle_roll_link)
         foot_candidates = [
@@ -267,7 +277,7 @@ class RoboshelfRetailNavEnv(gym.Env):
         return self._healthy_z_range[0] < torso_z < self._healthy_z_range[1]
 
     def _compute_reward(self):
-        """Kiszámítja a reward-ot (v15: velocity tracking + stuck detection + air_time fix)."""
+        """Kiszámítja a reward-ot (v17: lineáris tracking + curriculum felhajtóerő)."""
         robot_xy = self.data.body(self._torso_id).xpos[:2]
         dist_to_target = np.linalg.norm(self.target_pos - robot_xy)
 
@@ -278,14 +288,10 @@ class RoboshelfRetailNavEnv(gym.Env):
         lin_vel = self.data.body(self._torso_id).cvel[3:5]  # cvel[3,4] = lin_x, lin_y
         forward_component = np.dot(lin_vel, dir_unit)  # cél irányú sebesség [m/s]
 
-        # 1. Velocity tracking — Gaussian jutalom (v15, DeepMind MJX sztenderd)
-        # Formula: w_vel × exp(-(v_cmd - v_actual)² / sigma)
-        # Álló robot (v=0): exp(-1²/0.25) × 3.0 ≈ 0.054 (majdnem nulla!)
-        # 1 m/s robot:      exp(-0²/0.25) × 3.0 = 3.0   (maximális)
-        # 0.5 m/s robot:    exp(-0.25/0.25) × 3.0 ≈ 1.1 (közepes)
-        # FONTOS: ez felváltja a régi w_forward × forward_component tracking-et
-        vel_error = self.vel_cmd - forward_component
-        vel_tracking = self.w_vel * np.exp(-(vel_error ** 2) / self.vel_sigma)
+        # 1. Lineáris vel tracking (v11 bevált érték visszaállítva)
+        # Gaussian (v15/v16) nem adott elég erős haladási gradienst
+        # Lineáris: minél gyorsabban halad, annál több jutalom — nincs telítés
+        vel_tracking = self.w_forward * forward_component
 
         # 2. Potential-based distance shaping (Ng et al. 1999)
         # F(s,s') = γ·Φ(s') - Φ(s), Φ(s) = -dist → közeledés pozitív
@@ -348,7 +354,7 @@ class RoboshelfRetailNavEnv(gym.Env):
                         + goal_bonus + fall_penalty + air_time_reward + gait_reward)
 
         info = {
-            "vel_tracking": vel_tracking,
+            "forward_reward": vel_tracking,
             "forward_component": forward_component,
             "dist_shaping": dist_shaping,
             "proximity_bonus": proximity_bonus,
@@ -465,6 +471,14 @@ class RoboshelfRetailNavEnv(gym.Env):
             ACTION_SCALE = 0.3
             raw_ctrl = self._default_ctrl + action * ACTION_SCALE
             self.data.ctrl[:] = np.clip(raw_ctrl, ctrl_range[:, 0], ctrl_range[:, 1])
+
+        # Felhajtóerő alkalmazása (v17 curriculum)
+        # xfrc_applied shape: (nbody, 6) — [:3] torque, [3:] force (N, world frame)
+        # Z-irány (index 5): felfelé pozitív
+        # CurriculumCallback lineárisan csökkenti buoyancy_force-t 0-ra a tanítás során
+        # FONTOS: minden lépés előtt be kell állítani (mj_step nullázza)
+        if self.buoyancy_force > 0.0:
+            self.data.xfrc_applied[self._torso_id, 5] = self.buoyancy_force
 
         # Fizikai szimuláció (2 sub-step)
         # v13 tanulság: sub-step=1 → tracking reward negatív lesz (cvel kisebb/más irányú)

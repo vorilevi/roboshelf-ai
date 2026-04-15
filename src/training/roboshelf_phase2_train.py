@@ -304,25 +304,9 @@ LEVELS = {
     },
     "m2_10m_v16": {
         # v16: Stuck büntetés = fall büntetés + rövidebb ablak + erős air_time
-        #
-        # Diagnózis (v15): ep=75 lépés minden futásnál (stuck triggerelt, de nem elég)
-        #   w_stuck=-15 < w_fall=-20 → robot preferálta az állást az esésnél
-        #   w_air_time=1.0 → nem volt elég motiváció lábat emelni
-        #
-        # v16 változtatások:
-        #   1. w_stuck = -20 (= w_fall): állás és esés egyenértékű végzetes hiba
-        #      Szándékos esés (29 lép): 29×0.22 + (-20) = -13.6 → nem éri meg
-        #   2. stuck_window = 40 lépés (~0.8s): gyorsabb beavatkozás (v15: 75 lép)
-        #      Álló (40 lép): 40×0.22 + (-20) = -11.3 → veszteséges
-        #   3. w_air_time = 3.0: erős jutalom lábemelésnél (v15: 1.0)
-        #      Helyben járó: +3.27/lép × 85 lép = +253 → kifizetődő!
-        #      "Hiányzó láncszem": merjen lépni → tracking előre húzza
-        #
-        # Reward lépcsők:
-        #   Álló (40 lép):         -11.3
-        #   Szándékos esés:        -13.7  ← nem jobb!
-        #   Helyben járó (85 lép): +253.0  ← nagy ugrás
-        #   Mozgó 1m/s (85 lép):  +523.8  ← maximum
+        # Eredmény: ep=40 MINDEN futásnál → az ablak méretét tanulja meg, nem a járást
+        # Tanulság: stuck-detection a szimptómát bünteti, a PPO mindig megtalálja az ablakot
+        # → v17 curriculum megközelítéssel oldja meg
         "total_timesteps": 10_000_000,
         "n_steps": 2048,
         "batch_size": 512,
@@ -330,7 +314,67 @@ LEVELS = {
         "n_envs": 4,
         "learning_rate": 3e-4,
         "clip_range": 0.2,
-        "description": "M2 CPU ~1 óra (v16 FRESH: w_stuck=-20, stuck_window=40, w_air_time=3.0)",
+        "description": "ARCHIVÁLT - v16: ep=40 minden futásnál (ablak méretét tanulta) → v17",
+    },
+    "m2_10m_v17": {
+        # v17: Curriculum tanítás — felhajtóerő + stuck-window annealing
+        #
+        # Diagnózis (v15/v16): stuck-detection alapú megközelítés zsákutca
+        #   A PPO mindig az ablak méretére optimalizál (v15: 75, v16: 40)
+        #   Alapprobléma: a robot fizikailag nem tud biztonságosan lépni → nem próbálja
+        #
+        # v17 curriculum (ETH Zürich ANYmal / Unitree pipeline mintájára):
+        #   1. Felhajtóerő: ~206N Z-irányú erő a pelvis-en (gravitáció 60%-a)
+        #      Robot effektív tömege: 35kg → ~14kg → könnyebben egyensúlyoz, mer lépni
+        #      CurriculumCallback lineárisan nullázza 3M-7M lépés között
+        #   2. Stuck-window annealing: 9999 (=ki) → 40 lépés (3M-7M között)
+        #      Első 3M: nincs stuck-terminálás (robot tanul lépni)
+        #      3M-7M: fokozatosan szigorodik
+        #      7M-10M: teljes súly + 40 lépéses stuck (finomhangolás)
+        #   3. Lineáris tracking visszaállítva (v11: w_forward=8.0 × forward_component)
+        #      Gaussian (v15/v16) nem adott elég gradienst
+        #   4. w_air_time=3.0 marad (v16-ból bevált)
+        "total_timesteps": 10_000_000,
+        "n_steps": 2048,
+        "batch_size": 512,
+        "n_epochs": 10,
+        "n_envs": 4,
+        "learning_rate": 3e-4,
+        "clip_range": 0.2,
+        "description": "M2 CPU ~1 óra (v17 FRESH: curriculum felhajtóerő + stuck annealing)",
+        "curriculum": {
+            "phase1_end":        3_000_000,   # eddig teljes felhajtóerő, stuck ki
+            "phase2_end":        7_000_000,   # eddig lineáris csökkentés
+            "max_buoyancy":      103.0,        # N (gravitáció 30%-a, konzervatív)
+                                               # G1 URDF-ben lehet virtuális torzó link!
+                                               # 206N × 2 torzó = 412N > súly → repülne
+                                               # 103N biztonságos, ellenőrizd az első futásnál:
+                                               # torso_z > 1.5m az első lépésnél? → csökkenteni kell
+            "stuck_window_start": 9999,        # = kikapcsolva
+            "stuck_window_end":   40,          # lépés
+        },
+    },
+    "m2_20m_v17": {
+        # v17 curriculum, 20M lépés — a curriculum fázisok arányosan skálázva
+        # 10M: 0-3M / 3M-7M / 7M-10M  →  20M: 0-6M / 6M-14M / 14M-20M
+        # Indok: a curriculum minden fázisnak több időt ad, különösen a finom annealing-nek
+        # Várható: a robot a 6M-es plafon után több időt tölt az átmeneti fázisban
+        # → jobb járásminta mire a teljes súlyt kap (14M-nél)
+        "total_timesteps": 20_000_000,
+        "n_steps": 2048,
+        "batch_size": 512,
+        "n_epochs": 10,
+        "n_envs": 4,
+        "learning_rate": 3e-4,
+        "clip_range": 0.2,
+        "description": "M2 CPU ~2 óra (v17 FRESH 20M: curriculum arányosan skálázva)",
+        "curriculum": {
+            "phase1_end":         6_000_000,  # teljes felhajtóerő, stuck ki
+            "phase2_end":        14_000_000,  # lineáris annealing
+            "max_buoyancy":       103.0,       # N (30%, konzervatív)
+            "stuck_window_start": 9999,
+            "stuck_window_end":   40,
+        },
     },
     "m2_5m_v9": {
         # v9: tracking reward (sebesség × célirány), w_healthy=0.05, w_forward=8.0
@@ -489,6 +533,79 @@ def train(args):
 
     sync_cb = SyncVecNormalizeCallback(env, eval_env)
 
+    # Curriculum callback (v17: felhajtóerő + stuck-window annealing)
+    curriculum_cfg = cfg.get("curriculum", None)
+
+    class CurriculumCallback(BaseCallback):
+        """
+        Két párhuzamos annealing a curriculum tanításhoz:
+
+        1. Felhajtóerő (buoyancy): gravitáció X%-át ellensúlyozza a pelvis-en
+           - 0..phase1_end:          max_buoyancy (teljes segítség)
+           - phase1_end..phase2_end: lineáris csökkentés max→0
+           - phase2_end..:           0 (teljes súly)
+
+        2. Stuck-window: beragadás detektálásának időablaka
+           - 0..phase1_end:          stuck_window_start (pl. 9999 = kikapcsolva)
+           - phase1_end..phase2_end: lineáris csökkentés start→end
+           - phase2_end..:           stuck_window_end (pl. 40)
+
+        A callback set_attr()-ral írja az env példányok attribútumait,
+        ami SubprocVecEnv esetén is működik (SB3 API).
+        """
+        def __init__(self, train_env, total_steps, ccfg, log_interval=50_000):
+            super().__init__()
+            self.train_env = train_env
+            self.total_steps = total_steps
+            self.ccfg = ccfg
+            self.log_interval = log_interval
+            self._last_log = 0
+
+        def _on_step(self):
+            t = self.num_timesteps
+            c = self.ccfg
+            phase1 = c["phase1_end"]
+            phase2 = c["phase2_end"]
+
+            # --- Felhajtóerő annealing ---
+            max_b = c["max_buoyancy"]
+            if t <= phase1:
+                buoyancy = max_b
+            elif t <= phase2:
+                frac = (t - phase1) / (phase2 - phase1)
+                buoyancy = max_b * (1.0 - frac)
+            else:
+                buoyancy = 0.0
+
+            # --- Stuck-window annealing ---
+            sw_start = c["stuck_window_start"]
+            sw_end   = c["stuck_window_end"]
+            if t <= phase1:
+                stuck_window = sw_start
+            elif t <= phase2:
+                frac = (t - phase1) / (phase2 - phase1)
+                stuck_window = int(sw_start + frac * (sw_end - sw_start))
+            else:
+                stuck_window = sw_end
+
+            # Env attribútumok frissítése
+            self.train_env.set_attr("buoyancy_force", buoyancy)
+            self.train_env.set_attr("stuck_window", stuck_window)
+
+            # Logolás (ritkán, hogy ne lassítson)
+            if t - self._last_log >= self.log_interval:
+                self._last_log = t
+                print(f"\n  [Curriculum] {t:,} lép | buoyancy={buoyancy:.0f}N "
+                      f"({buoyancy/c['max_buoyancy']*100:.0f}%) | stuck_window={stuck_window}")
+            return True
+
+    callbacks = [sync_cb]
+    if curriculum_cfg is not None:
+        curriculum_cb = CurriculumCallback(env, cfg["total_timesteps"], curriculum_cfg)
+        callbacks.append(curriculum_cb)
+        print(f"  🎓 Curriculum aktív: buoyancy {curriculum_cfg['max_buoyancy']:.0f}N→0, "
+              f"stuck_window {curriculum_cfg['stuck_window_start']}→{curriculum_cfg['stuck_window_end']}")
+
     # Callbacks
     eval_callback = EvalCallback(
         eval_env,
@@ -511,7 +628,7 @@ def train(args):
 
     model.learn(
         total_timesteps=cfg["total_timesteps"],
-        callback=[sync_cb, eval_callback, checkpoint_callback],
+        callback=callbacks + [eval_callback, checkpoint_callback],
         tb_log_name=run_name,
         progress_bar=True,
     )
