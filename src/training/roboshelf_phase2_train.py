@@ -445,6 +445,45 @@ LEVELS = {
             "stuck_window_end":   40,
         },
     },
+    "m2_20m_v20": {
+        # v20: Grace period + Penalty curriculum + Hip lean eltávolítva + Contact clipping
+        #
+        # v19 diagnózis: ep=31 (v18: 166 volt!) — regresszió okai:
+        #   1. Hip lean (+0.1 rad) destabilizálta az alappózt → elesik ~30 lépésen belül
+        #   2. backward_window=30 grace period nélkül → korai terminálás (0.6s, robot nem stabilizált)
+        #   3. contact_cost clippolás nélkül → -30 per step eséskor → tanulás blokkolva
+        #   4. Büntetések teljes erővel kezdettől → felfedezés gátolva (forward grad = 0)
+        #
+        # v20 négy fix (env-ben implementálva):
+        #   1. Hip lean ELTÁVOLÍTVA: visszatérés v18 alappózhoz
+        #   2. Grace period = 150 lép (~3s): backward terminálás csak utána
+        #   3. Penalty curriculum: orientation + action_rate + dof_acc → 0.0→1.0 skálázva
+        #      Ugyanabban az 1M-3M ablakban ahol a buoyancy is nullára megy
+        #   4. Contact clipping: cfrc_ext clip[-1, 1] → stabil contact_cost
+        #
+        # Curriculum összehangolás:
+        #   0..1M:   teljes buoyancy (103N), penalty_scale=0.0 (szabad felfedezés)
+        #   1M..3M:  buoyancy 103N→0N, penalty_scale 0.0→1.0 (párhuzamos annealing)
+        #   3M..20M: buoyancy=0N, penalty_scale=1.0 (teljes tanulás)
+        "total_timesteps": 20_000_000,
+        "n_steps": 2048,
+        "batch_size": 512,
+        "n_epochs": 10,
+        "n_envs": 4,
+        "learning_rate": 3e-4,
+        "clip_range": 0.2,
+        "ent_coef": 0.01,
+        "description": "M2 CPU ~2 óra (v20: grace period + penalty curriculum + no hip lean + contact clip)",
+        "curriculum": {
+            "phase1_end":         1_000_000,  # 1M teljes buoyancy (v18/v19-cel egyező)
+            "phase2_end":         3_000_000,  # 1M-3M: buoyancy + penalty párhuzamos annealing
+            "max_buoyancy":       103.0,
+            "stuck_window_start": 9999,
+            "stuck_window_end":   40,
+            "penalty_start":      1_000_000,  # [ÚJ v20] penalty curriculum start
+            "penalty_end":        3_000_000,  # [ÚJ v20] penalty curriculum vége (= phase2_end)
+        },
+    },
     "m2_5m_v9": {
         # v9: tracking reward (sebesség × célirány), w_healthy=0.05, w_forward=8.0
         # Humanoid-v4 mintájára: sebesség-alapú forward reward folyamatos gradienst ad
@@ -607,7 +646,7 @@ def train(args):
 
     class CurriculumCallback(BaseCallback):
         """
-        Két párhuzamos annealing a curriculum tanításhoz:
+        Három párhuzamos annealing a curriculum tanításhoz:
 
         1. Felhajtóerő (buoyancy): gravitáció X%-át ellensúlyozza a pelvis-en
            - 0..phase1_end:          max_buoyancy (teljes segítség)
@@ -618,6 +657,12 @@ def train(args):
            - 0..phase1_end:          stuck_window_start (pl. 9999 = kikapcsolva)
            - phase1_end..phase2_end: lineáris csökkentés start→end
            - phase2_end..:           stuck_window_end (pl. 40)
+
+        3. Penalty scale [ÚJ v20]: orientációs + simasági büntetések skálázása
+           - 0..penalty_start:       0.0 (nincs büntetés — szabad felfedezés)
+           - penalty_start..penalty_end: lineáris növelés 0→1
+           - penalty_end..:          1.0 (teljes büntetés — hardware-ready policy)
+           Ha penalty_start/end nincs megadva a config-ban, penalty_scale fixen 1.0 marad.
 
         A callback set_attr()-ral írja az env példányok attribútumait,
         ami SubprocVecEnv esetén is működik (SB3 API).
@@ -657,15 +702,31 @@ def train(args):
             else:
                 stuck_window = sw_end
 
+            # --- Penalty scale annealing [ÚJ v20] ---
+            # Ha a config tartalmaz penalty_start/penalty_end-et, akkor skálázódik.
+            # Ha nem (régi konfig-ok visszafelé kompatibilitása), fixen 1.0 marad.
+            p_start = c.get("penalty_start", None)
+            p_end   = c.get("penalty_end", None)
+            if p_start is None or p_end is None:
+                penalty_scale = 1.0  # régi konfig: teljes büntetés (v17-v19 viselkedés)
+            elif t <= p_start:
+                penalty_scale = 0.0
+            elif t <= p_end:
+                penalty_scale = (t - p_start) / (p_end - p_start)
+            else:
+                penalty_scale = 1.0
+
             # Env attribútumok frissítése
             self.train_env.set_attr("buoyancy_force", buoyancy)
             self.train_env.set_attr("stuck_window", stuck_window)
+            self.train_env.set_attr("penalty_scale", penalty_scale)
 
             # Logolás (ritkán, hogy ne lassítson)
             if t - self._last_log >= self.log_interval:
                 self._last_log = t
                 print(f"\n  [Curriculum] {t:,} lép | buoyancy={buoyancy:.0f}N "
-                      f"({buoyancy/c['max_buoyancy']*100:.0f}%) | stuck_window={stuck_window}")
+                      f"({buoyancy/c['max_buoyancy']*100:.0f}%) | stuck_window={stuck_window} "
+                      f"| penalty_scale={penalty_scale:.2f}")
             return True
 
     callbacks = [sync_cb]
