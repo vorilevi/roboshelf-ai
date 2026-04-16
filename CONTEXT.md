@@ -1,7 +1,7 @@
 # Roboshelf AI — Session Kontextus
 
 > Ezt a fájlt az AI olvassa, hogy gyorsan felvegye a fonalat.
-> Utoljára frissítve: 2026-04-15 (v18 env kész: smoothness penalties + feltételes air_time)
+> Utoljára frissítve: 2026-04-15 (v19 env kész: no-backward + orientation + forward clip + hip lean)
 
 ---
 
@@ -83,24 +83,30 @@ polcokat feltölteni. Végcél: befektetői demo. 5 fázis.
 
 ## Ami éppen fut
 
-**KÉSZ** — v18 env + m2_20m_v18 szint megírva (2026-04-15):
-- `src/envs/roboshelf_retail_nav_env.py` → v18: feltételes air_time + smoothness penalties
-- `src/training/roboshelf_phase2_train.py` → `m2_20m_v18` + `ent_coef` per-szint konfig
+**KÉSZ** — v19 env + m2_20m_v19 szint megírva (2026-04-15):
+- `src/envs/roboshelf_retail_nav_env.py` → v19: no-backward terminálás + orientációs büntetés + forward clipping + hip lean
+- `src/training/roboshelf_phase2_train.py` → `m2_20m_v19` szint hozzáadva
 
-**v17 20M eredménye (2026-04-15):**
-- `python src/training/roboshelf_phase2_train.py --level m2_20m_v17`
-- 8M-nál: reward=+199 (curriculum működött!) → 12M-nál: -15241 (kapálózás beégett)
-- Diagnózis: feltétel nélküli air_time → kapálózás optimum; 6M fázis1 túl hosszú → entrópia elfogyott
+**v18 20M eredménye:**
+- ep hossz 166 (stabilabb!), dist=3.37m — robot visszafelé megy!
+- Diagnózis: w_dof_vel=-1e-3 blokkolta a mozgást; negatív forward reward instabil critic; nincs orientációs jel; hátrafelé menekülés büntetés nélkül
+
+**v19 négy fix (IMPLEMENTÁLVA):**
+1. Hip lean: `_default_ctrl[0] += 0.1`, `_default_ctrl[6] += 0.1` — gravitáció passzívan segít előre
+2. Orientációs büntetés: `w_orientation=-2.0 × (1-cos(yaw_error))` — folyamatos irányjelzés
+3. No-backward terminálás: 30 lépéses ablak, avg < -0.2 m/s → terminated + w_backward=-20
+4. Forward clipping: `max(0, forward_component)` — hátra = 0, nem negatív
+5. Smoothness enyhítve: w_dof_vel=0.0 (ki), w_dof_acc=-1e-7, w_action_rate=-0.005
 
 ---
 
 ## Következő teendők (prioritás sorrendben)
 
-1. **GitHub push + v18 fresh start (20M)** — Mac terminálból:
+1. **GitHub push + v19 fresh start (20M)** — Mac terminálból:
    ```bash
    cd ~/roboshelf-ai-dev/roboshelf-ai
-   git add -A && git commit -m "v18: smoothness penalties + feltételes air_time + ent_coef=0.01" && git push
-   python src/training/roboshelf_phase2_train.py --level m2_20m_v18
+   git add -A && git commit -m "v19: no-backward + orientation + forward clip + hip lean" && git push
+   python src/training/roboshelf_phase2_train.py --level m2_20m_v19
    ```
 2. **Fázis 3 tanítóscript megírása** — `src/envs/roboshelf_manipulation_env.py` már megvan,
    csak a `src/training/roboshelf_phase3_train.py` hiányzik
@@ -162,6 +168,8 @@ roboshelf-results/phase2/logs/             ← TensorBoard logok + evaluations.n
 | 16M   | +3.7        | 85       | v14 finetune (+6M, lr=5e-5) — **lokális optimum: robot áll, táv=3.18m (12cm haladás!)** |
 | 10M   | -244.9      | 75       | v15 fresh — stuck minden ep 75 lépésnél (w_stuck gyenge + air_time gyenge) |
 | 10M   | -192.7      | 40       | v16 fresh — stuck minden ep 40 lépésnél (PPO ablak méretét tanulta!) |
+| 20M   | +199@8M     | —        | v17 20M — curriculum működött! (+199@8M) majd kapálózás beégett (-15241@12M) |
+| 20M   | stabil      | 166      | v18 20M — stabilabb ep, DE dist=3.37m (visszafelé megy!) w_dof_vel blokkolt |
 
 **KRITIKUS ÁTTÖRÉS (v11):** A reset noise_scale=0.01 bevezetése törte át a determinisztikus ±0.0 std falat. A policy most általánosít, nem ragad lokális optimumba.
 **Áttörés (korábbi):** 7.8M lépésnél a reward pozitívba fordult (+42) és az ep hossz áttörte a 43 lépéses plafont (50 lépés).
@@ -196,7 +204,10 @@ roboshelf-results/phase2/logs/             ← TensorBoard logok + evaluations.n
 - **Catastrophic forgetting (MEGOLDVA v12b-ben)**: Reward komponens súly csökkentése (w_forward 8→4) finetune során → VecNormalize stat eltolódás → policy összeomlás (+133→-121). Fix: additív reward shaping (nem cserélni, hanem hozzáadni).
 - **Finetune vs fresh start**: Ha egy policy "beégett" mozgásmintán ragad, finetune nem tudja felülírni. Fresh start szükséges az architektúrális változásokhoz (pl. sub-step szám).
 - **Sub-step**: 2→1 (v13-ban). Lassabb fizika → robot tovább stabil → más mozgásmintát tanul a policy.
-- **v17 reward súlyok (AKTUÁLIS)**: w_forward=8.0 (lineáris tracking visszaállítva!), w_air_time=3.0, w_dist=2.0, w_proximity=2.0, w_healthy=0.05, w_ctrl=-0.001, w_contact=-0.0001, w_fall=-20.0, w_stuck=-20.0, w_gait=0.0
+- **v19 reward súlyok (AKTUÁLIS)**: w_forward=8.0 (max(0,v) clipping!), w_orientation=-2.0 (ÚJ yaw büntetés), w_air_time=3.0, w_dist=2.0, w_proximity=2.0, w_healthy=0.05, w_ctrl=-0.001, w_action_rate=-0.005 (enyhébb), w_dof_acc=-1e-7 (enyhébb), w_dof_vel=0.0 (KI), w_contact=-0.0001, w_fall=-20.0, w_stuck=-20.0, w_backward=-20.0 (ÚJ no-backward), w_gait=0.0
+- **v19 új elemek**: hip lean +0.1 rad reset-ben; no-backward detekció 30 lépéses ablak, -0.2 m/s küszöb; orientáció: robot xmat[:,1] → cos(yaw_error) számítás
+- **v18 reward súlyok (archivált)**: w_forward=8.0 (lineáris tracking), w_air_time=3.0 (feltételes v>0.1), w_action_rate=-0.01, w_dof_acc=-2.5e-7, w_dof_vel=-1e-3, w_dist=2.0, w_healthy=0.05, w_fall=-20.0, w_stuck=-20.0 — v18 probléma: dof_vel blokkolta a mozgást, negatív forward instabil critic
+- **v17 reward súlyok (archivált)**: w_forward=8.0 (lineáris tracking visszaállítva!), w_air_time=3.0, w_dist=2.0, w_proximity=2.0, w_healthy=0.05, w_ctrl=-0.001, w_contact=-0.0001, w_fall=-20.0, w_stuck=-20.0, w_gait=0.0
 - **v17 curriculum (10M)**: buoyancy 103N→0 (3M-7M), stuck_window 9999→40 (3M-7M)
 - **v17 curriculum (20M)**: buoyancy 103N→0 (6M-14M), stuck_window 9999→40 (6M-14M)
 - **v17 felhajtóerő**: 103N (konzervatív, 30%) — xfrc_applied[torso_id, 5], CurriculumCallback nullázza

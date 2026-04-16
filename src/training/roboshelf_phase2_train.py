@@ -409,6 +409,42 @@ LEVELS = {
             "stuck_window_end":   40,
         },
     },
+    "m2_20m_v19": {
+        # v19: No-backward terminálás + orientációs büntetés + forward clip + hip lean + enyhébb smoothness
+        #
+        # v18 diagnózis: ep=166 (stabilabb!), de dist=3.37m (visszafelé megy!)
+        #   Probléma 1: w_dof_vel=-1e-3 blokkolta az összes mozgást → robot megtanult minimálisan mozogni
+        #   Probléma 2: w_forward × negatív forward_component → negatív critic célok → instabil
+        #   Probléma 3: nincs orientációs jel → robot oldalaz/kifarol
+        #   Probléma 4: hátrafelé menés büntetés nélkül → "hátrafelé menekülés" helyi optimum
+        #
+        # v19 négy fix:
+        #   1. Forward hip lean (+0.1 rad hip_pitch reset-ben): gravitáció passzívan segít előre
+        #   2. Orientációs büntetés: w_orientation=-2.0 × (1-cos(yaw_error))
+        #      0 ha célra néz, -4.0 ha pontosan hátrafelé → folyamatos irányjelzés
+        #   3. No-backward terminálás: ha avg v_forward < -0.2 m/s (30 lép ablak) → term + -20
+        #      Hátrafelé menekülés mint az esés: egyformán büntetve
+        #   4. Forward reward clipping: max(0, forward_component) → hátra = 0, nem negatív
+        #      Stabilabb value becslés, tiszta gradiens jel
+        #   5. Smoothness penalties enyhítve (v18 túl agresszív volt):
+        #      w_dof_vel = 0.0 (ki), w_dof_acc = -1e-7 (-2.5e-7-ről), w_action_rate = -0.005 (-0.01-ről)
+        "total_timesteps": 20_000_000,
+        "n_steps": 2048,
+        "batch_size": 512,
+        "n_epochs": 10,
+        "n_envs": 4,
+        "learning_rate": 3e-4,
+        "clip_range": 0.2,
+        "ent_coef": 0.01,
+        "description": "M2 CPU ~2 óra (v19 FRESH 20M: no-backward + orientation + forward clip + hip lean)",
+        "curriculum": {
+            "phase1_end":         1_000_000,  # 1M teljes felhajtóerő (v18-cal egyező)
+            "phase2_end":         3_000_000,  # 1M-3M annealing
+            "max_buoyancy":       103.0,
+            "stuck_window_start": 9999,
+            "stuck_window_end":   40,
+        },
+    },
     "m2_5m_v9": {
         # v9: tracking reward (sebesség × célirány), w_healthy=0.05, w_forward=8.0
         # Humanoid-v4 mintájára: sebesség-alapú forward reward folyamatos gradienst ad

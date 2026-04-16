@@ -79,41 +79,49 @@ class RoboshelfRetailNavEnv(gym.Env):
         self.target_pos = np.array([0.0, 3.8])  # Raktár pozíció (x, y)
         self.start_pos = np.array([0.0, 0.5])   # Robot start (x, y)
 
-        # --- Reward súlyok (v18) ---
-        # v17 diagnózis: curriculum 8M-nál +199 reward → majd katasztrófa (-15241)
-        #   Probléma 1: w_air_time=3.0 feltétel nélkül → "kapálózás" helyi optimum
-        #     A robot megtanult helyben lábat rázni a felhajtóerőben (könnyű, nem esik)
-        #     A PPO entrópiája elfogyott → policy beégett → képtelen változtatni
-        #   Probléma 2: felhajtóerő eltűntével a kapálózás csillagászati ctrl/contact cost-ot okoz
-        #   Probléma 3: curriculum első fázis (6M) túl hosszú → túltanulás a könnyített fizikán
+        # --- Reward súlyok (v19) ---
+        # v18 diagnózis: ep hossz 100→166 (stabilabb!), de táv=3.37m (visszafelé megy!)
+        #   Probléma 1: w_dof_vel=-1e-3 túl erős → robot minimális mozgást tanul (nem esik, de nem halad)
+        #   Probléma 2: w_forward=8.0 × forward_component: negatív ha hátrafelé → instabil critic
+        #   Probléma 3: nincs orientációs jutalom → robot oldalaz/kifarol a cél elől
+        #   Probléma 4: nincs "no-backward" büntetés → hátrafelé menekülés biztonságos
         #
-        # v18 három fix (legged_gym / Isaac Lab alapján):
-        #   1. air_time feltételes: csak v_forward > 0.1 m/s esetén jutalmaz
-        #      Ref: legged_gym "first_foot_contact × velocity" logika
-        #      Helyben kapálózás értéke: 0 (nem kifizetődő)
-        #   2. Smoothness penalties (simasági büntetések):
-        #      action_rate: -(a_t - a_{t-1})² × w — hirtelen akcióváltás büntetése
-        #      dof_acc:     -ízületi gyorsulás² × w — nagy gyorsulás büntetése
-        #      dof_vel:     -ízületi sebesség² × w — nagy sebesség büntetése
-        #      Ref: Isaac Lab humanoid training, ETH ANYmal pipeline
-        #   3. ent_coef=0.01 (train scriptben) — entrópia megőrzése az annealing alatt
+        # v19 négy fix:
+        #   1. Alappóz előredőlés (+0.1 rad hip_pitch): súlypont előre → gravitáció segít
+        #      Reset-ben: default_ctrl[0] és [6] (left/right hip_pitch) += 0.1
+        #   2. Orientációs büntetés: yaw eltérés a cél iránytól → per-lépés penalty
+        #      w_orientation × (1 - cos(yaw_error)) — 0 ha célra néz, max ha szembe fordul
+        #   3. No-backward terminálás: ha avg v < -0.2 m/s (30 lép ablak) → terminated + -20
+        #   4. Forward reward clipping: max(0, forward_component) → hátrafelé = 0, nem negatív
+        #      Stabilabb critic, a terminálás bünteti a hátrafelé menést
+        #   5. Smoothness penalties enyhítve (v18 túl erős volt):
+        #      w_dof_vel = 0.0 (teljesen ki — blokkolta a mozgást)
+        #      w_dof_acc = -1e-7 (volt -2.5e-7)
+        #      w_action_rate = -0.005 (volt -0.01)
 
-        self.w_forward = 8.0         # Lineáris vel tracking (v11 bevált érték)
-        self.w_dist = 2.0            # Per-lépés PBRS (Ng et al. 1999)
+        self.w_forward = 8.0         # Forward reward (clipped: max(0, v))
+        self.w_dist = 2.0            # Per-lépés PBRS
         self.w_dist_final = 200.0    # Epizód végi dist bonus
         self.w_proximity = 2.0       # Proximity bonus 3.5m küszöbön
-        self.w_air_time = 3.0        # Feet air time [v18: csak v>0.1 m/s esetén!]
-        self.vel_air_threshold = 0.1  # m/s — ez alatt air_time = 0 (kapálózás elkerülése)
+        self.w_air_time = 3.0        # Feet air time (v>0.1 m/s feltétellel)
+        self.vel_air_threshold = 0.1 # m/s — ez alatt air_time = 0
+        self.w_orientation = -2.0    # Yaw büntetés [ÚJ v19]: cél iránytól eltérés
         self.w_healthy = 0.05        # Minimális alive bonus
         self.w_ctrl = -0.001         # Kontroll költség (action²)
-        self.w_action_rate = -0.01   # Akció változás büntetés [ÚJ v18] — (a_t - a_{t-1})²
-        self.w_dof_acc = -2.5e-7     # Ízületi gyorsulás büntetés [ÚJ v18]
-        self.w_dof_vel = -1e-3       # Ízületi sebesség büntetés [ÚJ v18]
+        self.w_action_rate = -0.005  # Akció változás [v19: -0.01→-0.005, enyhébb]
+        self.w_dof_acc = -1e-7       # Ízületi gyorsulás [v19: -2.5e-7→-1e-7, enyhébb]
+        self.w_dof_vel = 0.0         # Ízületi sebesség [v19: -1e-3→0.0, KI — blokkolta mozgást]
         self.w_contact = -0.0001     # Kontakt költség
         self.w_goal = 100.0          # Célba érkezés bonus
         self.w_fall = -20.0          # Esés büntetés
-        self.w_stuck = -20.0         # Stuck büntetés (= fall_penalty)
-        self.w_gait = 0.0            # Kikapcsolva (curriculum)
+        self.w_stuck = -20.0         # Stuck büntetés
+        self.w_backward = -20.0      # No-backward büntetés [ÚJ v19] (= fall_penalty)
+        self.w_gait = 0.0            # Kikapcsolva
+
+        # --- No-backward detekció [ÚJ v19] ---
+        self.backward_window = 30    # lépés ablak (~0.6s)
+        self.backward_threshold = -0.2  # m/s — ez alatt "hátrafelé megy"
+        self._backward_history = []
 
         # --- Curriculum paraméterek (CurriculumCallback frissíti) ---
         # buoyancy_force: Z-irányú külső erő a pelvis-en [N], 0 = kikapcsolva
@@ -283,7 +291,7 @@ class RoboshelfRetailNavEnv(gym.Env):
         return self._healthy_z_range[0] < torso_z < self._healthy_z_range[1]
 
     def _compute_reward(self):
-        """Kiszámítja a reward-ot (v17: lineáris tracking + curriculum felhajtóerő)."""
+        """Kiszámítja a reward-ot (v19: clipped forward + orientation + no-backward)."""
         robot_xy = self.data.body(self._torso_id).xpos[:2]
         dist_to_target = np.linalg.norm(self.target_pos - robot_xy)
 
@@ -294,10 +302,30 @@ class RoboshelfRetailNavEnv(gym.Env):
         lin_vel = self.data.body(self._torso_id).cvel[3:5]  # cvel[3,4] = lin_x, lin_y
         forward_component = np.dot(lin_vel, dir_unit)  # cél irányú sebesség [m/s]
 
-        # 1. Lineáris vel tracking (v11 bevált érték visszaállítva)
-        # Gaussian (v15/v16) nem adott elég erős haladási gradienst
-        # Lineáris: minél gyorsabban halad, annál több jutalom — nincs telítés
-        vel_tracking = self.w_forward * forward_component
+        # 1. Lineáris vel tracking [v19: max(0, v) clipping]
+        # v18 probléma: negatív forward_component → negatív reward → instabil critic
+        #   PPO negatív TD-hibát lát → hátrafelé menés is "tanítható" irány
+        # v19 fix: clip → 0 ha hátrafelé, a terminálás bünteti (w_backward = -20)
+        #   Stabilabb value becslés, tiszta tanulási jel: előre = pozitív, hátra = 0
+        vel_tracking = self.w_forward * max(0.0, forward_component)
+
+        # 1b. Orientációs büntetés [ÚJ v19]
+        # v18 probléma: robot oldalra/hátrafelé fordulva is kaphat forward_component-et
+        #   (ha oldalt fut és véletlen van forward összetevő)
+        # v19 fix: yaw eltérés büntetés — robot nézzen a cél felé
+        #   w_orientation × (1 - cos(yaw_error)): 0 ha célra néz, 2 ha pontosan szemben
+        #   Robottal együtt forgó koordinátarendszerben: xmat[col 1] = forward irány (Y)
+        torso_xmat = self.data.body(self._torso_id).xmat.reshape(3, 3)
+        robot_forward = torso_xmat[:2, 1]  # robot Y-tengelye a vízszintes síkban (forward)
+        robot_forward_norm = np.linalg.norm(robot_forward) + 1e-6
+        robot_forward_unit = robot_forward / robot_forward_norm
+        cos_yaw_error = np.dot(robot_forward_unit, dir_unit)  # [-1, 1], 1 = célra néz
+        orientation_penalty = self.w_orientation * (1.0 - cos_yaw_error)  # w_orient < 0 → negatív ha fordul
+
+        # No-backward detekció előzmény frissítése [ÚJ v19]
+        self._backward_history.append(forward_component)
+        if len(self._backward_history) > self.backward_window:
+            self._backward_history.pop(0)
 
         # 2. Potential-based distance shaping (Ng et al. 1999)
         # F(s,s') = γ·Φ(s') - Φ(s), Φ(s) = -dist → közeledés pozitív
@@ -368,7 +396,8 @@ class RoboshelfRetailNavEnv(gym.Env):
             right_match = not (right_contact ^ right_should_contact)
             gait_reward = self.w_gait * (float(left_match) + float(right_match))
 
-        total_reward = (vel_tracking + dist_shaping + proximity_bonus
+        total_reward = (vel_tracking + orientation_penalty
+                        + dist_shaping + proximity_bonus
                         + healthy_reward + ctrl_cost + contact_cost
                         + goal_bonus + fall_penalty + air_time_reward
                         + action_rate_cost + dof_acc_cost + dof_vel_cost + gait_reward)
@@ -376,6 +405,8 @@ class RoboshelfRetailNavEnv(gym.Env):
         info = {
             "forward_reward": vel_tracking,
             "forward_component": forward_component,
+            "orientation_penalty": orientation_penalty,
+            "cos_yaw_error": cos_yaw_error,
             "dist_shaping": dist_shaping,
             "proximity_bonus": proximity_bonus,
             "healthy_reward": healthy_reward,
@@ -460,6 +491,20 @@ class RoboshelfRetailNavEnv(gym.Env):
             self._default_ctrl[23] = -0.2
             self._default_ctrl[24] = 0.0
             self._default_ctrl[25] = 1.28
+
+        # Forward hip lean [ÚJ v19]: +0.1 rad hip pitch (pozitív = előredőlés G1-nél)
+        # Motiváció: súlypont kicsit előre → gravitáció passzívan segíti az előre haladást
+        #   Analóg a természetes emberi járással (enyhén előredőlve haladunk)
+        #   +0.1 rad ≈ 5.7° — elég hogy érezhető legyen, nem annyira hogy essen
+        # G1 aktuátor sorrend (lábak): hip_pitch, hip_roll, hip_yaw, knee, ankle_pitch, ankle_roll
+        #   Bal láb: [0]=bal hip_pitch, [1]=bal hip_roll, ...
+        #   Jobb láb: [6]=jobb hip_pitch, [7]=jobb hip_roll, ...
+        # FIGYELEM: Ha a G1 XML-ben más az aktuátor sorrend → módosítani kell!
+        #   Ellenőrzés: python -c "import mujoco; m = mujoco.MjModel.from_xml_path('g1.xml'); [print(i, m.actuator(i).name) for i in range(m.nu)]"
+        if self.model.nu >= 7:
+            self._default_ctrl[0] += 0.1   # bal hip_pitch (+0.1 rad előre)
+            self._default_ctrl[6] += 0.1   # jobb hip_pitch (+0.1 rad előre)
+
         self.data.ctrl[:] = self._default_ctrl.copy()
 
         # Forward kinematics
@@ -472,7 +517,8 @@ class RoboshelfRetailNavEnv(gym.Env):
         self._episode_time = 0.0  # Gait fázis időszámláló nullázása
         self._last_action = np.zeros(self.model.nu)   # ctrl cost inicializálás
         self._prev_action = np.zeros(self.model.nu)   # v18: action_rate cost inicializálás
-        self._vel_history = []  # stuck-detection előzmény nullázása
+        self._vel_history = []       # stuck-detection előzmény nullázása
+        self._backward_history = []  # v19: no-backward detekció nullázása
 
         obs = self._get_obs()
         info = {"dist_to_target": self._prev_dist_to_target}
@@ -537,6 +583,20 @@ class RoboshelfRetailNavEnv(gym.Env):
             stuck = True
             terminated = True  # korai terminálás
 
+        # No-backward terminálás [ÚJ v19]
+        # Ha az utolsó backward_window lépésben az átlag sebesség < backward_threshold
+        #   → robot tartósan hátrafelé megy → korai terminálás + büntetés
+        # Cél: megelőzni a "hátrafelé menekülés" helyi optimumot (v18 diagnózis)
+        # Ablak: 30 lép (~0.6s) — elég hosszú hogy véletlen rezgés ne triggereljon
+        # Küszöb: -0.2 m/s — egyértelműen hátrafelé, nem csak lassú haladás
+        # _backward_history már frissítve van _compute_reward-ban (minden lépésben)
+        backward_triggered = False
+        if (not terminated
+                and len(self._backward_history) == self.backward_window
+                and np.mean(self._backward_history) < self.backward_threshold):
+            backward_triggered = True
+            terminated = True
+
         # Truncated: max lépésszám (Gymnasium kezeli)
         truncated = False
 
@@ -553,12 +613,20 @@ class RoboshelfRetailNavEnv(gym.Env):
                 info["stuck_penalty"] = self.w_stuck
             else:
                 info["stuck_penalty"] = 0.0
+            # v19: no-backward büntetés
+            if backward_triggered:
+                reward += self.w_backward
+                info["backward_penalty"] = self.w_backward
+            else:
+                info["backward_penalty"] = 0.0
         else:
             info["final_dist_bonus"] = 0.0
             info["dist_improvement"] = 0.0
             info["stuck_penalty"] = 0.0
+            info["backward_penalty"] = 0.0
 
         info["stuck"] = stuck
+        info["backward_triggered"] = backward_triggered
 
         return obs, reward, terminated, truncated, info
 
