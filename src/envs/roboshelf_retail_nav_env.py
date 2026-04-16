@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Roboshelf AI — Fázis 2: G1 lokomóció a retail boltban (v20)
+Roboshelf AI — Fázis 2: G1 lokomóció a retail boltban (v21)
 
 Gymnasium wrapper a Unitree G1 navigációjához a kiskereskedelmi környezetben.
 A robot megtanulja a boltban való járást: egyensúly, akadálykerülés, célnavigáció.
@@ -79,53 +79,70 @@ class RoboshelfRetailNavEnv(gym.Env):
         self.target_pos = np.array([0.0, 3.8])  # Raktár pozíció (x, y)
         self.start_pos = np.array([0.0, 0.5])   # Robot start (x, y)
 
-        # --- Reward súlyok (v20) ---
-        # v19 diagnózis: ep=31 (v18: 166 volt!) — regresszió okai:
-        #   Probléma 1: Hip lean (+0.1 rad) destabilizálta az alappózt
-        #      Robot 5.7°-kal előredöntve indul → 30 lépésen belül elesik
-        #   Probléma 2: backward_window=30 (0.6s) türelmi idő nélkül
-        #      Robot stabilizálódás előtt backward avg < -0.2 m/s → korai terminálás
-        #   Probléma 3: contact_cost clippolás nélkül
-        #      Eséskor cfrc_ext értékek 100-500N → -30 per step → tanulás blokkolva
-        #   Probléma 4: orientációs + simasági büntetések teljes erővel a tanítás elejétől
-        #      Felfedezés gátolva, forward gradient nullán → -41 pt/lép
+        # --- Reward súlyok (v21) ---
+        # v20 diagnózis: ep=138, reward=+126, dist=3.10m (0.2m haladás/ep)
+        #   Vizuális megfigyelés: robot helyben forog párat, majd elesik — NEM lép!
+        #   Gyökér ok: w_orientation * penalty_scale = 0 az első 1M lépésben
+        #     → robot megtanult forogni (semmilyen irányjelzés nem volt korai fázisban)
+        #     → 1M után bekapcsolt orientation penalty megpróbálta javítani, de a forgás már beégett
+        #   Másodlagos ok: w_gait=0.0 → nincs ösztönzés a valódi lépésekre
+        #     → vel_air_threshold=0.1 m/s → air_time reward sosem aktiválódott
         #
-        # v20 négy fix:
-        #   1. Hip lean eltávolítva: v19 destabilizálta (166→31 lép regresszió)
-        #      Lean ötlet jó, implementáció káros volt
-        #   2. Grace period (150 lép, ~3s): backward terminálás késleltetése
-        #      Robot megkapja az időt a stabilizálódásra és az első lépés megtételére
-        #   3. Penalty curriculum: w_orientation + w_action_rate + w_dof_acc
-        #      0.0 → 1.0 skálázás a tanítás során (CurriculumCallback kezeli)
-        #      Korai fázis: szabad felfedezés; késői fázis: tiszta, realisztikus mozgás
-        #   4. Contact force clipping: cfrc_ext clip[-1, 1] (Gymnasium Humanoid-v4 szerint)
-        #      Eséskor sem explodál a contact_cost → stabil reward skála
+        # v21 változtatások (két büntetés-kategória szétválasztása):
+        #
+        #   1. KATEGÓRIA — Skálázatlan iránybüntetések (azonnal hatnak, penalty_scale nélkül)
+        #      Ezek nélkül a korai felfedezés káoszba fullad (v20 tanulsága)
+        #      a) Yaw szögsebesség: -w_yaw_rate * |ang_vel_z| → pörgés azonnali büntetése
+        #      b) Laterális: -w_lateral * |cél-merőleges sebesség| → oldalazás büntetése
+        #      c) Orientáció: w_orientation * (1-cos(yaw)) → NEM skálázott többé
+        #      d) Hip yaw: -w_hip_yaw * (q_hip_yaw_bal² + q_hip_yaw_jobb²) → pörgés gyökerénél
+        #
+        #   2. KATEGÓRIA — Skálázott simasági büntetések (0→1 curriculum, penalty_scale)
+        #      Felfedezést nem gátolják a korai fázisban
+        #      a) action_rate_cost, b) dof_acc_cost, c) dof_vel_cost (visszakapcsolt)
+        #
+        #   3. Grace period pontosítása: CSAK a terminálást (no-backward, stuck) késlelteti
+        #      Per-step iránybüntetések azonnal hatnak a grace period alatt is
+        #
+        #   4. Gait reward bekapcsolva: w_gait=0.5 — robot elég stabil (v20: ep=138)
+        #      vel_air_threshold: 0.1 → 0.02 m/s — alacsony küszöb, lassú járásnál is jutalmaz
 
-        self.w_forward = 8.0         # Forward reward (clipped: max(0, v))
-        self.w_dist = 2.0            # Per-lépés PBRS
-        self.w_dist_final = 200.0    # Epizód végi dist bonus
-        self.w_proximity = 2.0       # Proximity bonus 3.5m küszöbön
-        self.w_air_time = 3.0        # Feet air time (v>0.1 m/s feltétellel)
-        self.vel_air_threshold = 0.1 # m/s — ez alatt air_time = 0
-        self.w_orientation = -2.0    # Yaw büntetés (cél iránytól eltérés) — penalty_scale-lel
-        self.w_healthy = 0.05        # Minimális alive bonus
-        self.w_ctrl = -0.001         # Kontroll költség (action²) — NEM skálázott
-        self.w_action_rate = -0.005  # Akció változás — penalty_scale-lel skálázott
-        self.w_dof_acc = -1e-7       # Ízületi gyorsulás — penalty_scale-lel skálázott
-        self.w_dof_vel = 0.0         # Ízületi sebesség (kikapcsolva — blokkolta mozgást)
-        self.w_contact = -0.0001     # Kontakt költség (clippelt cfrc_ext²)
-        self.w_goal = 100.0          # Célba érkezés bonus
+        # Pozitív jutalmak
+        self.w_forward = 8.0         # Cél irányú sebesség (max(0, v) clipping)
+        self.w_dist = 2.0            # Per-lépés távolságcsökkentés (PBRS)
+        self.w_dist_final = 200.0    # Epizód végi távolság bonus
+        self.w_proximity = 2.0       # Közelségi bonus (3.5m küszöbön belül)
+        self.w_air_time = 3.0        # Lábemeléses jutalom (haladás közben)
+        self.vel_air_threshold = 0.02 # m/s — v20: 0.1 → v21: 0.02 (alacsonyabb küszöb)
+        self.w_healthy = 0.05        # Minimális életben-maradás jutalom
+        self.w_goal = 100.0          # Célba érés bonus
+        self.w_gait = 0.5            # Gait timing [v21: BE — v20-ban 0.0 volt]
+
+        # Kontroll / fizikai büntetések (NEM skálázottak)
+        self.w_ctrl = -0.001         # Aktuátor erőfeszítés (action²)
+        self.w_contact = -0.0001     # Kontakt erők (cfrc_ext clip[-1,1]²)
+
+        # Skálázatlan iránybüntetések [ÚJ v21 — azonnal hatnak, penalty_scale NÉLKÜL]
+        self.w_orientation = -1.0    # Yaw eltérés (1-cos): v20: -2.0 skálázott → v21: -1.0 FIX
+        self.w_yaw_rate = -0.5       # Z-tengely körüli szögsebesség: pörgés büntetése
+        self.w_lateral = -1.0        # Cél-merőleges (oldalazó) sebesség büntetése
+        self.w_hip_yaw = -0.3        # Hip yaw ízületek alapállapottól való eltérése
+
+        # Skálázott simasági büntetések [penalty_scale-lel, 0→1 curriculum]
+        self.w_action_rate = -0.005  # Hirtelen akcióváltás büntetése
+        self.w_dof_acc = -1e-7       # Ízületi gyorsulás büntetése
+        self.w_dof_vel = -5e-5       # Ízületi sebesség [v21: visszakapcsolva, de gyengébb]
+
+        # Terminálási büntetések
         self.w_fall = -20.0          # Esés büntetés
-        self.w_stuck = -20.0         # Stuck büntetés
-        self.w_backward = -20.0      # No-backward büntetés
-        self.w_gait = 0.0            # Kikapcsolva
+        self.w_stuck = -20.0         # Helyben állás büntetés
+        self.w_backward = -20.0      # Tartós hátrafelé haladás büntetés
 
-        # --- Penalty curriculum skálázó [ÚJ v20] ---
-        # CurriculumCallback frissíti 0.0→1.0-ra a tanítás során
-        # Érintett komponensek: w_orientation, w_action_rate, w_dof_acc
-        # FONTOS: alapértelmezés 1.0 — standalone futásnál (curriculum nélkül) teljes büntetés
-        # v20 tanításban: CurriculumCallback az első lépés után azonnal 0.0-ra állítja
-        self.penalty_scale = 1.0     # 0=nincs büntetés, 1=teljes büntetés (CurriculumCallback írja)
+        # --- Penalty curriculum skálázó ---
+        # Csak a simasági büntetésekre vonatkozik (action_rate, dof_acc, dof_vel)
+        # Az iránybüntetések (orientation, yaw_rate, lateral, hip_yaw) NEM skálázottak
+        # FONTOS: alapértelmezés 1.0 — standalone futásnál teljes büntetés
+        self.penalty_scale = 1.0     # CurriculumCallback írja (0→1 a tanítás során)
 
         # --- No-backward detekció (grace period + ablak) ---
         self.backward_window = 30    # lépés ablak (~0.6s) — a grace period után aktív
@@ -302,68 +319,82 @@ class RoboshelfRetailNavEnv(gym.Env):
         return self._healthy_z_range[0] < torso_z < self._healthy_z_range[1]
 
     def _compute_reward(self):
-        """Kiszámítja a reward-ot (v20: grace period + penalty curriculum + contact clipping)."""
+        """Kiszámítja a reward-ot (v21: skálázatlan iránybüntetések + gait bekapcsolva)."""
         robot_xy = self.data.body(self._torso_id).xpos[:2]
         dist_to_target = np.linalg.norm(self.target_pos - robot_xy)
 
-        # Cél irány és tényleges sebesség
+        # Cél irány és sebesség komponensek
         direction_to_target = self.target_pos - robot_xy
         dist_norm = np.linalg.norm(direction_to_target) + 1e-6
         dir_unit = direction_to_target / dist_norm
-        lin_vel = self.data.body(self._torso_id).cvel[3:5]  # cvel[3,4] = lin_x, lin_y
-        forward_component = np.dot(lin_vel, dir_unit)  # cél irányú sebesség [m/s]
+        # cvel formátum: [ang_x, ang_y, ang_z, lin_x, lin_y, lin_z]
+        cvel = self.data.body(self._torso_id).cvel
+        lin_vel_xy = cvel[3:5]              # vízszintes sebesség vektor (x, y)
+        ang_vel_z  = cvel[2]                # Z-tengely körüli szögsebesség (pörgés)
+        forward_component = np.dot(lin_vel_xy, dir_unit)  # cél irányú sebesség [m/s]
+        # Laterális (oldalazó) sebesség: teljes vízszintes − cél irányú komponens
+        lateral_vel = lin_vel_xy - forward_component * dir_unit
+        lateral_speed = np.linalg.norm(lateral_vel)
 
-        # 1. Lineáris vel tracking [v19: max(0, v) clipping]
-        # v18 probléma: negatív forward_component → negatív reward → instabil critic
-        #   PPO negatív TD-hibát lát → hátrafelé menés is "tanítható" irány
-        # v19 fix: clip → 0 ha hátrafelé, a terminálás bünteti (w_backward = -20)
-        #   Stabilabb value becslés, tiszta tanulási jel: előre = pozitív, hátra = 0
+        # 1. Előre haladás jutalma (max(0,v) clipping — negatív forward = 0, nem negatív)
         vel_tracking = self.w_forward * max(0.0, forward_component)
 
-        # 1b. Orientációs büntetés [v19: bevezetett, v20: penalty_scale-lel skálázott]
-        # v19 fix: yaw eltérés büntetés — robot nézzen a cél felé
-        #   w_orientation × (1 - cos(yaw_error)): 0 ha célra néz, 2 ha pontosan szemben
-        # v20 változás: penalty_scale-lel skálázott (0→1 a tanítás során)
-        #   Korai fázis: 0 → szabad orientáció, felfedezés nem büntetett
-        #   Késői fázis: teljes büntetés → clean policy, real-hardware-ready
-        torso_xmat = self.data.body(self._torso_id).xmat.reshape(3, 3)
-        robot_forward = torso_xmat[:2, 1]  # robot Y-tengelye a vízszintes síkban (forward)
-        robot_forward_norm = np.linalg.norm(robot_forward) + 1e-6
-        robot_forward_unit = robot_forward / robot_forward_norm
-        cos_yaw_error = np.dot(robot_forward_unit, dir_unit)  # [-1, 1], 1 = célra néz
-        orientation_penalty = self.w_orientation * (1.0 - cos_yaw_error) * self.penalty_scale
+        # --- SKÁLÁZATLAN IRÁNYBÜNTETÉSEK [ÚJ v21] ---
+        # v20 hiba: orientation * penalty_scale = 0 korai fázisban → pörgés beégett
+        # v21 fix: ezek azonnal hatnak, penalty_scale NÉLKÜL
 
-        # No-backward detekció előzmény frissítése [ÚJ v19]
+        # 1b. Orientáció büntetés: yaw eltérés a cél iránytól (NEM skálázott)
+        torso_xmat = self.data.body(self._torso_id).xmat.reshape(3, 3)
+        robot_forward = torso_xmat[:2, 1]  # robot Y-tengelye (előre néző irány)
+        robot_forward_unit = robot_forward / (np.linalg.norm(robot_forward) + 1e-6)
+        cos_yaw_error = np.dot(robot_forward_unit, dir_unit)  # 1=célra néz, -1=háttal áll
+        orientation_penalty = self.w_orientation * (1.0 - cos_yaw_error)  # max: -2.0
+
+        # 1c. Yaw szögsebesség büntetés: Z-tengely körüli forgás (NEM skálázott)
+        # Pörgés közvetlen büntetése — nem az eredményt (rossz irány), hanem a mozgást
+        yaw_rate_penalty = self.w_yaw_rate * abs(ang_vel_z)  # pl. -0.5 × |ω_z|
+
+        # 1d. Laterális sebesség büntetés: oldalazás büntetése (NEM skálázott)
+        # Kiszámítva a cél-merőleges sebességkomponensből (irányfüggetlen)
+        lateral_penalty = self.w_lateral * lateral_speed  # pl. -1.0 × |v_lateral|
+
+        # 1e. Hip yaw büntetés: csípő-kifordító ízületek alapállapottól való eltérése
+        # G1 lábak sorrendje: hip_pitch[0/6], hip_roll[1/7], hip_yaw[2/8], ...
+        # qpos[7:] = lábak (freejoint = qpos[0:7])
+        # Bal hip_yaw: qpos[9] (7 + 2), Jobb hip_yaw: qpos[15] (7 + 6 + 2)
+        hip_yaw_penalty = 0.0
+        if self.model.nq >= 16:
+            q_hip_yaw_bal  = self.data.qpos[9]   # bal hip_yaw
+            q_hip_yaw_jobb = self.data.qpos[15]  # jobb hip_yaw
+            hip_yaw_penalty = self.w_hip_yaw * (q_hip_yaw_bal**2 + q_hip_yaw_jobb**2)
+
+        # No-backward detekció előzmény frissítése
         self._backward_history.append(forward_component)
         if len(self._backward_history) > self.backward_window:
             self._backward_history.pop(0)
 
-        # 2. Potential-based distance shaping (Ng et al. 1999)
-        # F(s,s') = γ·Φ(s') - Φ(s), Φ(s) = -dist → közeledés pozitív
-        # Stabilizáló hatás, kis súly (v14-ből marad)
+        # 2. Potential-based távolságcsökkentés (Ng et al. 1999)
         dist_delta = (self._prev_dist_to_target - dist_to_target)
         dist_shaping = self.w_dist * dist_delta
         self._prev_dist_to_target = dist_to_target
 
-        # 3. Proximity bonus (lineáris, 3.5m küszöb — azonnal aktív a 3.3m-es starttól)
+        # 3. Közelségi bonus (3.5m küszöbön belül, lineáris)
         PROXIMITY_THRESHOLD = 3.5
         proximity_bonus = 0.0
         if dist_to_target < PROXIMITY_THRESHOLD:
             proximity_bonus = self.w_proximity * (PROXIMITY_THRESHOLD - dist_to_target) / PROXIMITY_THRESHOLD
 
-        # 4. Egyensúly jutalom (minimális alive bonus)
+        # 4. Életben-maradás jutalom
         healthy_reward = self.w_healthy if self._is_healthy() else 0.0
 
-        # 5. Kontroll költség
+        # 5. Kontroll költség (NEM skálázott)
         ctrl_cost = self.w_ctrl * np.sum(np.square(self._last_action))
 
-        # 6. Kontakt költség [v20: cfrc_ext clippolva [-1, 1] — Gymnasium Humanoid-v4 szerint]
-        # v19 hiba: clippolás nélkül eséskor cfrc_ext 100-500N → -30 per step → tanulás blokkolva
-        # v20 fix: clip → max contact_cost ≈ -0.0001 × 330 × 1² = -0.033 per step (stabil)
+        # 6. Kontakt erő büntetés (cfrc_ext clip[-1,1] — Gymnasium Humanoid-v4 szerint)
         contact_forces = np.clip(self.data.cfrc_ext.flat.copy(), -1.0, 1.0)
         contact_cost = self.w_contact * np.sum(np.square(contact_forces))
 
-        # 7. Cél bonus
+        # 7. Célba érés bonus
         goal_bonus = 0.0
         if dist_to_target < 0.5:
             goal_bonus = self.w_goal
@@ -371,60 +402,63 @@ class RoboshelfRetailNavEnv(gym.Env):
         # 8. Esés büntetés (termináláskor egyszer)
         fall_penalty = self.w_fall if not self._is_healthy() else 0.0
 
-        # 9. Feet air time jutalom [v18: feltételes — csak v_forward > vel_air_threshold]
-        # v17 hiba: feltétel nélküli air_time → "kapálózás" helyi optimum
-        #   Robot megtanult helyben lábat rázni (felhajtóerőben lóg) → entrópia elfogy
-        # v18 fix (legged_gym konvenció): jutalom csak ha robot tényleg halad
-        #   Helyben kapálózás értéke: 0.0 → nem kifizetődő
+        # 9. Lábemeléses jutalom [v21: vel_air_threshold 0.1→0.02 m/s]
+        # Alacsony küszöb: lassú járás esetén is aktiválódik (v20-ban sosem aktiválódott)
         air_time_reward = 0.0
         if self._left_foot_id is not None and self.w_air_time > 0.0:
-            if forward_component > self.vel_air_threshold:  # csak haladásnál jutalmaz
+            if forward_component > self.vel_air_threshold:
                 left_contact  = self.data.cfrc_ext[self._left_foot_id,  2] > 1.0
                 right_contact = self.data.cfrc_ext[self._right_foot_id, 2] > 1.0
                 n_air = (not left_contact) + (not right_contact)
                 air_time_reward = self.w_air_time * n_air
 
-        # 10. Smoothness penalties [v18: bevezetett, v20: penalty_scale-lel skálázott]
-        # Isaac Lab / ETH ANYmal alapján — hardware transfer readiness
-        # v20 változás: penalty_scale 0→1 curriculum (CurriculumCallback)
-        #   Korai tanítás: 0 → robot szabadon felfedezhet, kapálózhat
-        #   Késői tanítás: teljes súly → clean, hardware-safe mozgás
-        # a) action_rate: az előző és jelenlegi akció különbsége — simább mozgás
+        # 10. Skálázott simasági büntetések (penalty_scale 0→1 a curriculum során)
+        # a) Hirtelen akcióváltás büntetése
         action_rate_cost = self.w_action_rate * np.sum(
             np.square(self._last_action - self._prev_action)
         ) * self.penalty_scale
-        # b) dof_acc: ízületi gyorsulás (qacc) — nagy gyorsulás büntetése
+        # b) Ízületi gyorsulás büntetése
         dof_acc_cost = self.w_dof_acc * np.sum(
-            np.square(self.data.qacc[6:])  # 6: freejoint kihagyva
+            np.square(self.data.qacc[6:])
         ) * self.penalty_scale
-        # c) dof_vel: ízületi sebesség (qvel) — kikapcsolva (blokkolta a mozgást)
-        dof_vel_cost = self.w_dof_vel * np.sum(np.square(self.data.qvel[6:]))
+        # c) Ízületi sebesség büntetése [v21: visszakapcsolva, de gyengébb: -5e-5]
+        dof_vel_cost = self.w_dof_vel * np.sum(
+            np.square(self.data.qvel[6:])
+        ) * self.penalty_scale
 
-        # 11. Gait timing reward — kikapcsolva (curriculum)
+        # 11. Gait timing jutalom [v21: BEKAPCSOLVA — w_gait=0.5]
+        # v20: kikapcsolva (0.0) → nem volt ösztönzés valódi járásra
+        # v21: bekapcsolva — robot elég stabil (ep=138) ahhoz, hogy gait-et tanuljon
         gait_reward = 0.0
         if self._left_foot_id is not None and self.w_gait > 0.0:
             phase = (self._episode_time % self._gait_period) / self._gait_period
-            phase_left  = phase
-            phase_right = (phase + self._gait_offset) % 1.0
-            left_should_contact  = phase_left  < self._stance_threshold
-            right_should_contact = phase_right < self._stance_threshold
+            left_should_contact  = phase < self._stance_threshold
+            right_should_contact = (phase + self._gait_offset) % 1.0 < self._stance_threshold
             left_contact  = self.data.cfrc_ext[self._left_foot_id,  2] > 1.0
             right_contact = self.data.cfrc_ext[self._right_foot_id, 2] > 1.0
             left_match  = not (left_contact  ^ left_should_contact)
             right_match = not (right_contact ^ right_should_contact)
             gait_reward = self.w_gait * (float(left_match) + float(right_match))
 
-        total_reward = (vel_tracking + orientation_penalty
+        total_reward = (vel_tracking
+                        + orientation_penalty + yaw_rate_penalty
+                        + lateral_penalty + hip_yaw_penalty
                         + dist_shaping + proximity_bonus
                         + healthy_reward + ctrl_cost + contact_cost
                         + goal_bonus + fall_penalty + air_time_reward
-                        + action_rate_cost + dof_acc_cost + dof_vel_cost + gait_reward)
+                        + action_rate_cost + dof_acc_cost + dof_vel_cost
+                        + gait_reward)
 
         info = {
             "forward_reward": vel_tracking,
             "forward_component": forward_component,
             "orientation_penalty": orientation_penalty,
+            "yaw_rate_penalty": yaw_rate_penalty,
+            "lateral_penalty": lateral_penalty,
+            "hip_yaw_penalty": hip_yaw_penalty,
             "cos_yaw_error": cos_yaw_error,
+            "ang_vel_z": ang_vel_z,
+            "lateral_speed": lateral_speed,
             "dist_shaping": dist_shaping,
             "proximity_bonus": proximity_bonus,
             "healthy_reward": healthy_reward,

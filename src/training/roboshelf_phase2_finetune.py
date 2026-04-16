@@ -92,8 +92,14 @@ def finetune(args):
     from stable_baselines3.common.vec_env import VecNormalize
     from stable_baselines3.common.callbacks import EvalCallback, CheckpointCallback, BaseCallback
 
+    # v21 fine-tune: futtatáskor a v20 modellből indul
+    # Env frissítések (v21): skálázatlan iránybüntetések + gait=0.5 + vel_air_threshold=0.02
+    # Konfiguráció: 0N buoyancy (v20 már leépítette), penalty_scale=1.0-ról indul
+    # LR: 1e-4 (v20-nál 3e-4 volt — kisebb lépések a finomhangoláshoz)
+    # Clip: 0.15 (v20-nál 0.2 volt — konzervatívabb frissítések)
+
     timestamp = int(time.time())
-    run_name = f"g1_retail_nav_finetune_{timestamp}"
+    run_name = f"g1_retail_nav_m2_20m_v21_{timestamp}"
 
     # Device
     if torch.cuda.is_available():
@@ -323,20 +329,20 @@ def finetune(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Roboshelf AI — G1 Fine-tune")
     parser.add_argument(
-        "--steps", type=int, default=3_000_000,
-        help="További lépések száma (default: 3M)"
+        "--steps", type=int, default=20_000_000,
+        help="További lépések száma (default: 20M — v21 fine-tune)"
     )
     parser.add_argument(
         "--model", type=str, default=None,
-        help="Alap modell .zip útvonala (default: roboshelf-results/phase2/models/best/best_model.zip)"
+        help="Alap modell .zip útvonala (default: legfrissebb *_final.zip)"
     )
     parser.add_argument(
-        "--lr", type=float, default=3e-5,
-        help="Learning rate (default: 3e-5, kisebb mint az eredeti 1e-4)"
+        "--lr", type=float, default=1e-4,
+        help="Learning rate (default: 1e-4 — v21 fine-tune)"
     )
     parser.add_argument(
-        "--clip", type=float, default=0.1,
-        help="PPO clip range (default: 0.1, szűkebb mint az eredeti 0.15)"
+        "--clip", type=float, default=0.15,
+        help="PPO clip range (default: 0.15 — v21 fine-tune)"
     )
     args = parser.parse_args()
     finetune(args)
