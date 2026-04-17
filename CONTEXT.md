@@ -1,7 +1,7 @@
 # Roboshelf AI — Session Kontextus
 
 > Ezt a fájlt az AI olvassa, hogy gyorsan felvegye a fonalat.
-> Utoljára frissítve: 2026-04-15 (v19 env kész: no-backward + orientation + forward clip + hip lean)
+> Utoljára frissítve: 2026-04-17 (v21 eredmények kiértékelve, v22 implementálva + tanítás folyamatban)
 
 ---
 
@@ -13,13 +13,15 @@
 **Tanítás indítása (fresh start):**
 ```bash
 cd ~/roboshelf-ai-dev/roboshelf-ai
-python src/training/roboshelf_phase2_train.py --level m2_3m_nogait
+python src/training/roboshelf_phase2_train.py --level m2_20m_v20
 ```
+
+⚠️ **FONTOS:** Mindig `cd ~/roboshelf-ai-dev/roboshelf-ai` után add ki a parancsokat! A sima `python src/...` a home könyvtárból futtatva "No such file or directory" hibát ad.
 
 **Fine-tune indítása (meglévő modellből folytatás):**
 ```bash
 cd ~/roboshelf-ai-dev/roboshelf-ai
-python src/training/roboshelf_phase2_finetune.py --steps 6000000 --lr 1e-4 --clip 0.15
+python src/training/roboshelf_phase2_finetune.py
 ```
 
 **TensorBoard:**
@@ -34,6 +36,15 @@ tensorboard --logdir roboshelf-results/phase2/logs
 cd ~/roboshelf-ai-dev/roboshelf-ai
 git add -A && git commit -m "..." && git push
 ```
+
+**Policy vizualizáció (replay):**
+```bash
+cd ~/roboshelf-ai-dev/roboshelf-ai
+mjpython replay_policy.py                # legfrissebb modell, 5 ep
+mjpython replay_policy.py --slowdown 2.0 # lassítva
+mjpython replay_policy.py --episodes 3  # 3 epizód
+```
+⚠️ **KRITIKUS macOS:** `mjpython` kell, nem `python`! A sima `python`-nal `RuntimeError: launch_passive requires mjpython on macOS` hibát ad. A `mjpython` a MuJoCo saját Python wrappere — ugyanúgy hívható mint a `python`.
 
 **FONTOS:** Az AI sandbox-ból (Cowork) NEM tud git push-olni (nincs auth) — mindig Mac terminálból kell!
 
@@ -71,7 +82,8 @@ polcokat feltölteni. Végcél: befektetői demo. 5 fázis.
 - Reward súlyok G1-re kalibrálva: w_ctrl=-0.001, w_contact=-0.0001
 
 **Tanítóscript:** `src/training/roboshelf_phase2_train.py`
-- Szintek: teszt / kozepes / teljes / m2_2ora
+- Szintek: m2_20m_v22 (aktív), archivált: m2_2ora, m2_3m_*, m2_10m_*, m2_20m_v17–v20
+- GPU/Kaggle szintek (teszt/kozepes/teljes) kikommentálva — nem releváns M2-n
 - Device: CPU (MPS ki van zárva — float64 konfliktus)
 - Fontos fix: float32 obs dtype, CPU device, VecNormalize sync callback
 
@@ -81,51 +93,64 @@ polcokat feltölteni. Végcél: befektetői demo. 5 fázis.
 
 ---
 
-## Ami éppen fut
+## Jelenlegi állapot (2026-04-17)
 
-**KÉSZ** — v19 env + m2_20m_v19 szint megírva (2026-04-15):
-- `src/envs/roboshelf_retail_nav_env.py` → v19: no-backward terminálás + orientációs büntetés + forward clipping + hip lean
-- `src/training/roboshelf_phase2_train.py` → `m2_20m_v19` szint hozzáadva
+**v22 ELINDÍTVA** — friss tanítás (nem fine-tune!), 20M lépés:
+```bash
+python src/training/roboshelf_phase2_train.py --level m2_20m_v22
+```
 
-**v18 20M eredménye:**
-- ep hossz 166 (stabilabb!), dist=3.37m — robot visszafelé megy!
-- Diagnózis: w_dof_vel=-1e-3 blokkolta a mozgást; negatív forward reward instabil critic; nincs orientációs jel; hátrafelé menekülés büntetés nélkül
+**v21 KÉSZ és kiértékelve** — 120.1 perc, 20M lépés (fine-tune v20-ból):
+- Modell: `roboshelf-results/phase2/models/g1_retail_nav_m2_20m_v21_*_final.zip`
+- Kiértékelés (10 ep): átlag reward=**-317.8** (±11.9), ep hossz=**86**, dist=**3.18m** (start: 3.3m)
+- **SIKERTELEN**: robot szinte nem mozdult (12cm haladás 3.3m-ből)
+- Diagnózis:
+  1. Fine-tune nem tudta felülírni a v20-ban beégett álló/forgó viselkedést
+  2. `w_healthy=0.05 > w_dist×max_step=0.04` → álló robot jobban fizet mint a lassú mozgás!
+  3. Fizikai instabilitás: egyenes lábból lábemelés → torzó billenés → esés (86. lépésnél)
 
-**v19 négy fix (IMPLEMENTÁLVA):**
-1. Hip lean: `_default_ctrl[0] += 0.1`, `_default_ctrl[6] += 0.1` — gravitáció passzívan segít előre
-2. Orientációs büntetés: `w_orientation=-2.0 × (1-cos(yaw_error))` — folyamatos irányjelzés
-3. No-backward terminálás: 30 lépéses ablak, avg < -0.2 m/s → terminated + w_backward=-20
-4. Forward clipping: `max(0, forward_component)` — hátra = 0, nem negatív
-5. Smoothness enyhítve: w_dof_vel=0.0 (ki), w_dof_acc=-1e-7, w_action_rate=-0.005
+**v22 változtatások (env v22 + train):**
+1. **Guggoló alappóz** (Unitree unitree_rl_gym alapján): `hip_pitch=-0.1`, `knee=+0.3`, `ankle_pitch=-0.2` rad — qpos-ban ÉS _default_ctrl-ban egyaránt
+2. **Lábcsúszás büntetés**: `w_feet_slip=-0.1` — talajon lévő láb lineáris sebessége² × kontakt
+3. **Lábak távolság büntetés**: `w_feet_distance=-1.0`, min 0.15m — lábkeresztezés megelőzése
+4. **Reward rebalance**: `w_healthy=0.01` (volt 0.05), `w_dist=8.0` (volt 2.0), `w_orientation=-2.0` (volt -1.0)
+5. **Train script**: GPU/Kaggle szintek kikommentálva, output mappa egyszerűsítve
+
+**Következő lépés:** v22 eredmények figyelése (ep hossz > 86? dist csökken?)
 
 ---
 
-## Következő teendők (prioritás sorrendben)
+## Következő teendők
 
-1. **GitHub push + v19 fresh start (20M)** — Mac terminálból:
+1. **v22 tanítás figyelése** — reward, ep hossz, dist figyelése TensorBoard-on
    ```bash
-   cd ~/roboshelf-ai-dev/roboshelf-ai
-   git add -A && git commit -m "v19: no-backward + orientation + forward clip + hip lean" && git push
-   python src/training/roboshelf_phase2_train.py --level m2_20m_v19
+   tensorboard --logdir roboshelf-results/phase2/logs
    ```
-2. **Fázis 3 tanítóscript megírása** — `src/envs/roboshelf_manipulation_env.py` már megvan,
-   csak a `src/training/roboshelf_phase3_train.py` hiányzik
+   Várt jelzések: ep hossz > 86 (guggoló póz stabilabb), dist csökken (reward rebalance)
+2. **replay_policy.py** — vizuális ellenőrzés v22 után
+   ```bash
+   mjpython replay_policy.py --slowdown 2.0
+   ```
+3. **GitHub push** (Mac terminálból):
+   ```bash
+   git add -A && git commit -m "v22: guggoló alappóz + lábcsúszás/távolság büntetés + reward rebalance" && git push
+   ```
 
 ---
 
 ## Fontos fájlok
 
 ```
-src/envs/roboshelf_retail_nav_env.py       ← Fázis 2 env (v11: reset noise, tracking reward, w_healthy=0.05)
+src/envs/roboshelf_retail_nav_env.py       ← Fázis 2 env (v22: guggoló póz + lábcsúszás/távolság)
 src/envs/roboshelf_manipulation_env.py     ← Fázis 3 env (vázlat, kész)
 src/envs/assets/roboshelf_retail_store.xml ← Bolt MJCF (2 gondola, termékek)
-src/training/roboshelf_phase2_train.py     ← Fázis 2 tanítás (m2_10m_v11 szint az utolsó)
+src/training/roboshelf_phase2_train.py     ← Fázis 2 tanítás (m2_20m_v22 az aktív szint)
 src/training/roboshelf_phase2_finetune.py  ← Fine-tune script (evaluations.npz append-del)
 src/training/humanoid_v4_baseline.py       ← Humanoid-v4 baseline (3M → reward=855 ✅)
-notebooks/roboshelf_phase2_kaggle.ipynb    ← Kaggle notebook (KaggleFlushCb + SyncNormCb fix)
+replay_policy.py                           ← Policy vizualizáció (mjpython-nal futtatandó!)
 src/roboshelf_phase2_check.py              ← Rendszerellenőrző
-roboshelf-results/phase2/models/best/      ← Legjobb modell (20M lépés, reward=+133.6, ep=83)
-roboshelf-results/phase2/logs/             ← TensorBoard logok + evaluations.npz (teljes história)
+roboshelf-results/phase2/models/           ← Modellek (legfrissebb: v21, reward=-317, ep=86)
+roboshelf-results/phase2/logs/             ← TensorBoard logok + evaluations.npz
 ```
 
 ---
@@ -170,6 +195,10 @@ roboshelf-results/phase2/logs/             ← TensorBoard logok + evaluations.n
 | 10M   | -192.7      | 40       | v16 fresh — stuck minden ep 40 lépésnél (PPO ablak méretét tanulta!) |
 | 20M   | +199@8M     | —        | v17 20M — curriculum működött! (+199@8M) majd kapálózás beégett (-15241@12M) |
 | 20M   | stabil      | 166      | v18 20M — stabilabb ep, DE dist=3.37m (visszafelé megy!) w_dof_vel blokkolt |
+| 20M   | -1281       | 31       | v19 20M — REGRESSZIÓ: hip lean destabilizált + backward_window=30 grace nélkül |
+| 20M   | **+126**    | **138**  | **v20 20M — ÁTTÖRÉS: +reward, előre mozog! dist=3.10m (0.20m haladás/ep)** |
+| 20M   | **-317.8**  | **86**   | v21 fine-tune — SIKERTELEN: 12cm haladás, álló robot lokális optimum |
+| fut   | —           | —        | **v22 FRESH START** — guggoló póz + lábcsúszás/távolság + reward rebalance (2026-04-17) |
 
 **KRITIKUS ÁTTÖRÉS (v11):** A reset noise_scale=0.01 bevezetése törte át a determinisztikus ±0.0 std falat. A policy most általánosít, nem ragad lokális optimumba.
 **Áttörés (korábbi):** 7.8M lépésnél a reward pozitívba fordult (+42) és az ep hossz áttörte a 43 lépéses plafont (50 lépés).
@@ -204,8 +233,23 @@ roboshelf-results/phase2/logs/             ← TensorBoard logok + evaluations.n
 - **Catastrophic forgetting (MEGOLDVA v12b-ben)**: Reward komponens súly csökkentése (w_forward 8→4) finetune során → VecNormalize stat eltolódás → policy összeomlás (+133→-121). Fix: additív reward shaping (nem cserélni, hanem hozzáadni).
 - **Finetune vs fresh start**: Ha egy policy "beégett" mozgásmintán ragad, finetune nem tudja felülírni. Fresh start szükséges az architektúrális változásokhoz (pl. sub-step szám).
 - **Sub-step**: 2→1 (v13-ban). Lassabb fizika → robot tovább stabil → más mozgásmintát tanul a policy.
-- **v19 reward súlyok (AKTUÁLIS)**: w_forward=8.0 (max(0,v) clipping!), w_orientation=-2.0 (ÚJ yaw büntetés), w_air_time=3.0, w_dist=2.0, w_proximity=2.0, w_healthy=0.05, w_ctrl=-0.001, w_action_rate=-0.005 (enyhébb), w_dof_acc=-1e-7 (enyhébb), w_dof_vel=0.0 (KI), w_contact=-0.0001, w_fall=-20.0, w_stuck=-20.0, w_backward=-20.0 (ÚJ no-backward), w_gait=0.0
-- **v19 új elemek**: hip lean +0.1 rad reset-ben; no-backward detekció 30 lépéses ablak, -0.2 m/s küszöb; orientáció: robot xmat[:,1] → cos(yaw_error) számítás
+- **v22 reward súlyok (AKTUÁLIS — tanítás fut):**
+  - Alappóz: hip_pitch=-0.1, knee=+0.3, ankle_pitch=-0.2 rad (qpos + _default_ctrl)
+  - Rebalance: w_healthy=0.01 (volt 0.05), w_dist=8.0 (volt 2.0), w_orientation=-2.0 (volt -1.0)
+  - Új büntetések: w_feet_slip=-0.1, w_feet_distance=-1.0 (feet_min_distance=0.15m)
+  - v21-ből örökölt: w_yaw_rate=-0.5, w_lateral=-1.0, w_hip_yaw=-0.3 (skálázatlan)
+  - Skálázott simasági: w_action_rate=-0.005, w_dof_acc=-1e-7, w_dof_vel=-5e-5
+  - Gait: w_gait=0.5, vel_air_threshold=0.02 m/s
+  - Változatlan: w_forward=8.0, w_air_time=3.0, w_proximity=2.0, w_ctrl=-0.001, w_contact=-0.0001, w_fall=-20.0, w_stuck=-20.0, w_backward=-20.0, w_dist_final=200.0
+- **v21 reward súlyok (archivált — fine-tune volt, sikertelen):**
+  - Skálázatlan iránybüntetések: w_orientation=-1.0, w_yaw_rate=-0.5, w_lateral=-1.0, w_hip_yaw=-0.3
+  - Skálázott simasági: w_action_rate=-0.005, w_dof_acc=-1e-7, w_dof_vel=-5e-5
+  - Gait: w_gait=0.5, vel_air_threshold=0.02; többi: w_healthy=0.05, w_dist=2.0
+- **v21 motiváció**: v20 replay: robot helyben forog és elesik. Oka: penalty_scale=0 korai fázisban → pörgés beégett. Fix: iránybüntetések NEM skálázottak. DE: fine-tune nem tudta felülírni a beégett viselkedést → fresh start szükséges (v22).
+- **v20 reward súlyok (archivált)**: w_forward=8.0, w_orientation=-2.0×penalty_scale, w_air_time=3.0, w_dist=2.0, w_proximity=2.0, w_healthy=0.05, w_ctrl=-0.001, w_action_rate=-0.005×penalty_scale, w_dof_acc=-1e-7×penalty_scale, w_dof_vel=0.0, w_contact=-0.0001, w_fall=-20.0, w_stuck=-20.0, w_backward=-20.0, w_gait=0.0
+- **v20 új elemek**: penalty_scale curriculum (0→1, 1M-3M); grace_period=150 lép; contact clipping; hip lean ELTÁVOLÍTVA
+- **v20 curriculum**: 0-1M: buoyancy=103N, penalty_scale=0; 1M-3M: mindkettő lineáris 0-ra ill. 1-re; 3M-20M: buoyancy=0, penalty_scale=1.0
+- **v19 reward súlyok (archivált)**: azonos v20-szal DE: hip lean +0.1 rad, nincs grace period, nincs penalty_scale, nincs contact clipping — ezek okozták a regressziót
 - **v18 reward súlyok (archivált)**: w_forward=8.0 (lineáris tracking), w_air_time=3.0 (feltételes v>0.1), w_action_rate=-0.01, w_dof_acc=-2.5e-7, w_dof_vel=-1e-3, w_dist=2.0, w_healthy=0.05, w_fall=-20.0, w_stuck=-20.0 — v18 probléma: dof_vel blokkolta a mozgást, negatív forward instabil critic
 - **v17 reward súlyok (archivált)**: w_forward=8.0 (lineáris tracking visszaállítva!), w_air_time=3.0, w_dist=2.0, w_proximity=2.0, w_healthy=0.05, w_ctrl=-0.001, w_contact=-0.0001, w_fall=-20.0, w_stuck=-20.0, w_gait=0.0
 - **v17 curriculum (10M)**: buoyancy 103N→0 (3M-7M), stuck_window 9999→40 (3M-7M)
@@ -228,4 +272,4 @@ roboshelf-results/phase2/logs/             ← TensorBoard logok + evaluations.n
 ## GitHub
 
 Repo: https://github.com/vorilevi/roboshelf-ai
-Utolsó commit: "Fix: G1 Kaggle útvonal, find timeout javítás, mujoco_menagerie klón"
+Utolsó commit: "v22: guggoló alappóz + lábcsúszás/távolság büntetés + reward rebalance" (2026-04-17)

@@ -2,13 +2,16 @@
 """
 Roboshelf AI — Fázis 2: G1 Retail Navigáció PPO tanítás
 
-Kaggle/Colab-kompatibilis tanítási script.
+Lokális tanítási script (M2 Mac).
 A G1 humanoid megtanul járni a retail boltban a raktárig.
 
-Használat (Kaggle cellában):
-  !python roboshelf_phase2_train.py --level teszt     # ~5 perc
-  !python roboshelf_phase2_train.py --level kozepes   # ~30 perc
-  !python roboshelf_phase2_train.py --level teljes    # ~2-4 óra
+Használat:
+  python src/training/roboshelf_phase2_train.py --level m2_20m_v22
+
+# Kaggle/Colab használat (jelenleg nem aktív):
+#   !python roboshelf_phase2_train.py --level teszt     # ~5 perc
+#   !python roboshelf_phase2_train.py --level kozepes   # ~30 perc GPU-n
+#   !python roboshelf_phase2_train.py --level teljes    # ~2-4 óra GPU-n
 """
 
 import argparse
@@ -26,63 +29,26 @@ if str(_ENVS_DIR) not in sys.path:
 import numpy as np
 import gymnasium as gym
 
-# --- Output mappa (Kaggle/Colab/lokális kompatibilis) ---
-if os.path.exists("/kaggle/working"):
-    OUTPUT_DIR = Path("/kaggle/working/roboshelf-phase2-results")
-elif os.path.exists("/content"):
-    OUTPUT_DIR = Path("/content/roboshelf-phase2-results")
-else:
-    # Repo-relatív útvonal: a script src/training/-ban van, tehát ../../roboshelf-results/phase2
-    _REPO_ROOT = _THIS_DIR.parent.parent
-    _RESULTS_DIR = _REPO_ROOT / "roboshelf-results" / "phase2"
-    if _RESULTS_DIR.exists() or (_REPO_ROOT / "roboshelf-results").exists():
-        OUTPUT_DIR = _RESULTS_DIR
-    else:
-        OUTPUT_DIR = Path.home() / "Documents" / "roboshelf-ai-dev" / "roboshelf-results" / "phase2"
+# --- Output mappa (repo-relatív) ---
+_REPO_ROOT = _THIS_DIR.parent.parent
+OUTPUT_DIR = _REPO_ROOT / "roboshelf-results" / "phase2"
 
 MODELS_DIR = OUTPUT_DIR / "models"
 LOGS_DIR = OUTPUT_DIR / "logs"
 
 # --- Szintek ---
 LEVELS = {
-    "teszt": {
-        "total_timesteps": 100_000,
-        "n_steps": 2048,
-        "batch_size": 256,
-        "n_epochs": 10,
-        "n_envs": 4,
-        "learning_rate": 3e-4,
-        "clip_range": 0.2,
-        "description": "Gyors teszt (~5 perc)",
-    },
-    "kozepes": {
-        "total_timesteps": 2_000_000,
-        "n_steps": 2048,
-        "batch_size": 512,
-        "n_epochs": 10,
-        "n_envs": 8,
-        "learning_rate": 1e-4,
-        "clip_range": 0.15,
-        "description": "Közepes (~30 perc GPU-n)",
-    },
-    "teljes": {
-        "total_timesteps": 10_000_000,
-        "n_steps": 2048,
-        "batch_size": 1024,
-        "n_epochs": 10,
-        "n_envs": 16,
-        "learning_rate": 1e-4,
-        "clip_range": 0.15,
-        "description": "Teljes (~2-4 óra GPU-n)",
-    },
+    # GPU/Kaggle szintek — KIKOMMENTÁLVA, M2-n nem releváns
+    # "teszt":   { "total_timesteps": 100_000,    "n_envs": 4,  "description": "GPU teszt" },
+    # "kozepes": { "total_timesteps": 2_000_000,  "n_envs": 8,  "description": "GPU közepes" },
+    # "teljes":  { "total_timesteps": 10_000_000, "n_envs": 16, "description": "GPU teljes" },
     "m2_2ora": {
         # M2 CPU-ra optimalizált ~2 órás tanítás
-        # ~1000 FPS × 7200s = ~7.2M lépés reálisan, de 3M biztosan belefér
         "total_timesteps": 3_000_000,
         "n_steps": 2048,
         "batch_size": 256,
         "n_epochs": 10,
-        "n_envs": 4,          # 4 párhuzamos env, CPU-n biztonságos
+        "n_envs": 4,
         "learning_rate": 1e-4,
         "clip_range": 0.15,
         "description": "M2 CPU ~2 óra (3M lépés, 4 env)",
@@ -94,7 +60,7 @@ LEVELS = {
         "batch_size": 256,
         "n_epochs": 10,
         "n_envs": 4,
-        "learning_rate": 3e-5,   # kisebb LR a 3M-es modell folytatásához
+        "learning_rate": 3e-5,
         "clip_range": 0.1,
         "description": "M2 CPU ~1 óra (6M lépés, 4 env)",
     },
@@ -106,7 +72,7 @@ LEVELS = {
         "batch_size": 256,
         "n_epochs": 10,
         "n_envs": 4,
-        "learning_rate": 3e-4,   # magasabb LR a fresh starthoz
+        "learning_rate": 3e-4,
         "clip_range": 0.2,
         "description": "M2 CPU fresh start ~2 óra (3M lépés, új reward shaping)",
     },
@@ -482,6 +448,44 @@ LEVELS = {
             "stuck_window_end":   40,
             "penalty_start":      1_000_000,  # [ÚJ v20] penalty curriculum start
             "penalty_end":        3_000_000,  # [ÚJ v20] penalty curriculum vége (= phase2_end)
+        },
+    },
+    "m2_20m_v22": {
+        # v22: FRISS TANÍTÁS (nem fine-tune!) — 3 fizikai fix + reward rebalance
+        #
+        # v21 diagnózis: ep=86, reward=-317, dist=3.18m (12cm haladás 3.3m-ből)
+        #   Fő ok: fine-tune a v20-ból → beégett álló/forgó viselkedés nem tanulható ki
+        #   Reward hiba: w_healthy=0.05 > w_dist×max_step=0.04 → állás jobban fizet!
+        #   Fizikai hiba: egyenes lábból lábemelés → torzó billenés → esés (86. lépésnél)
+        #
+        # v22 négy változtatás (env v22-ben implementálva):
+        #   A. Guggoló alappóz: hip_pitch=-0.1, knee=+0.3, ankle_pitch=-0.2 rad
+        #      Forrás: Unitree unitree_rl_gym official config
+        #   B. Lábcsúszás büntetés: w_feet_slip=-0.1 (talajon lévő láb ne csússzon)
+        #   C. Lábak távolság büntetés: w_feet_distance=-1.0 (min 0.15m, ne keresztezzék)
+        #   D. Reward rebalance: w_healthy=0.01, w_dist=8.0, w_orientation=-2.0
+        #
+        # Curriculum: azonos v20-zal (buoyancy + penalty annealing)
+        #   0..1M:   teljes buoyancy (103N), penalty_scale=0.0
+        #   1M..3M:  buoyancy 103N→0N, penalty_scale 0.0→1.0
+        #   3M..20M: buoyancy=0N, penalty_scale=1.0
+        "total_timesteps": 20_000_000,
+        "n_steps": 2048,
+        "batch_size": 512,
+        "n_epochs": 10,
+        "n_envs": 4,
+        "learning_rate": 3e-4,
+        "clip_range": 0.2,
+        "ent_coef": 0.01,
+        "description": "M2 CPU ~2 óra (v22: guggoló póz + lábcsúszás/távolság + reward rebalance)",
+        "curriculum": {
+            "phase1_end":         1_000_000,
+            "phase2_end":         3_000_000,
+            "max_buoyancy":       103.0,
+            "stuck_window_start": 9999,
+            "stuck_window_end":   40,
+            "penalty_start":      1_000_000,
+            "penalty_end":        3_000_000,
         },
     },
     "m2_5m_v9": {

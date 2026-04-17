@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Roboshelf AI — Fázis 2: G1 lokomóció a retail boltban (v21)
+Roboshelf AI — Fázis 2: G1 lokomóció a retail boltban (v22)
 
 Gymnasium wrapper a Unitree G1 navigációjához a kiskereskedelmi környezetben.
 A robot megtanulja a boltban való járást: egyensúly, akadálykerülés, célnavigáció.
@@ -79,42 +79,47 @@ class RoboshelfRetailNavEnv(gym.Env):
         self.target_pos = np.array([0.0, 3.8])  # Raktár pozíció (x, y)
         self.start_pos = np.array([0.0, 0.5])   # Robot start (x, y)
 
-        # --- Reward súlyok (v21) ---
-        # v20 diagnózis: ep=138, reward=+126, dist=3.10m (0.2m haladás/ep)
-        #   Vizuális megfigyelés: robot helyben forog párat, majd elesik — NEM lép!
-        #   Gyökér ok: w_orientation * penalty_scale = 0 az első 1M lépésben
-        #     → robot megtanult forogni (semmilyen irányjelzés nem volt korai fázisban)
-        #     → 1M után bekapcsolt orientation penalty megpróbálta javítani, de a forgás már beégett
-        #   Másodlagos ok: w_gait=0.0 → nincs ösztönzés a valódi lépésekre
-        #     → vel_air_threshold=0.1 m/s → air_time reward sosem aktiválódott
+        # --- Reward súlyok (v22) ---
+        # v21 diagnózis: ep=86, reward=-317, dist=3.18m (csak 12cm haladás!)
+        #   Fine-tune a v20-ból — a beégett álló/forgó viselkedés nem volt kitanulható
+        #   Gyökér ok #1: w_healthy=0.05 > w_dist×max_step=0.04 → álló robot jobban fizet!
+        #   Gyökér ok #2: ep=86 lépésnél mindig összeesik → fizikai instabilitás
+        #     Unitree hivatalos unitree_rl_gym: G1 soha nem indul egyenes lábakkal!
+        #     Egyenes lábból lábemelés → teljes torzó billenés → esés
+        #   Gyökér ok #3: csúszó támaszkodó láb → nincs talajerő → esés
+        #   Gyökér ok #4: lábak keresztezik egymást → robot saját magában megbotlik
         #
-        # v21 változtatások (két büntetés-kategória szétválasztása):
+        # v22 változtatások (3 fizikai fix + reward rebalance):
         #
-        #   1. KATEGÓRIA — Skálázatlan iránybüntetések (azonnal hatnak, penalty_scale nélkül)
-        #      Ezek nélkül a korai felfedezés káoszba fullad (v20 tanulsága)
-        #      a) Yaw szögsebesség: -w_yaw_rate * |ang_vel_z| → pörgés azonnali büntetése
-        #      b) Laterális: -w_lateral * |cél-merőleges sebesség| → oldalazás büntetése
-        #      c) Orientáció: w_orientation * (1-cos(yaw)) → NEM skálázott többé
-        #      d) Hip yaw: -w_hip_yaw * (q_hip_yaw_bal² + q_hip_yaw_jobb²) → pörgés gyökerénél
+        #   A. GUGGOLÓ ALAPPÓZ [ÚJ v22] — Unitree unitree_rl_gym alapján
+        #      hip_pitch: -0.1 rad, knee: +0.3 rad, ankle_pitch: -0.2 rad
+        #      Hatás: lejjebb viszi a súlypontot, lábemelés lehetséges torzó-billenés nélkül
         #
-        #   2. KATEGÓRIA — Skálázott simasági büntetések (0→1 curriculum, penalty_scale)
-        #      Felfedezést nem gátolják a korai fázisban
-        #      a) action_rate_cost, b) dof_acc_cost, c) dof_vel_cost (visszakapcsolt)
+        #   B. LÁBCSÚSZÁS BÜNTETÉS [ÚJ v22] — modern legged_gym szerint
+        #      w_feet_slip: -0.1 × (talajon lévő láb lineáris sebessége²)
+        #      Hatás: a támaszkodó láb nem csúszik hátra, stabil talajerő
         #
-        #   3. Grace period pontosítása: CSAK a terminálást (no-backward, stuck) késlelteti
-        #      Per-step iránybüntetések azonnal hatnak a grace period alatt is
+        #   C. LÁBAK TÁVOLSÁG + ÜTKÖZÉS BÜNTETÉS [ÚJ v22] — legged_gym szerint
+        #      w_feet_distance: -1.0 × max(0, min_dist - actual_dist)² ha túl közel
+        #      Hatás: lábak nem keresztezik egymást, robot nem botlik saját magában
         #
-        #   4. Gait reward bekapcsolva: w_gait=0.5 — robot elég stabil (v20: ep=138)
-        #      vel_air_threshold: 0.1 → 0.02 m/s — alacsony küszöb, lassú járásnál is jutalmaz
+        #   D. REWARD REBALANCE [ÚJ v22]
+        #      w_healthy: 0.05 → 0.01 (ne fizessen többet az állás mint a haladás)
+        #      w_dist: 2.0 → 8.0 (per-step mozgás jutalom > egészség jutalom)
+        #      w_orientation: -1.0 → -2.0 (erősebb irányvezérlés)
+        #
+        #   v21 örökölt változtatások (megmaradnak):
+        #      Skálázatlan iránybüntetések (yaw_rate, lateral, hip_yaw, orientation)
+        #      Gait reward: w_gait=0.5, vel_air_threshold=0.02
 
         # Pozitív jutalmak
         self.w_forward = 8.0         # Cél irányú sebesség (max(0, v) clipping)
-        self.w_dist = 2.0            # Per-lépés távolságcsökkentés (PBRS)
+        self.w_dist = 8.0            # Per-lépés távolságcsökkentés (PBRS) [v22: 2.0→8.0]
         self.w_dist_final = 200.0    # Epizód végi távolság bonus
         self.w_proximity = 2.0       # Közelségi bonus (3.5m küszöbön belül)
         self.w_air_time = 3.0        # Lábemeléses jutalom (haladás közben)
         self.vel_air_threshold = 0.02 # m/s — v20: 0.1 → v21: 0.02 (alacsonyabb küszöb)
-        self.w_healthy = 0.05        # Minimális életben-maradás jutalom
+        self.w_healthy = 0.01        # Minimális életben-maradás jutalom [v22: 0.05→0.01]
         self.w_goal = 100.0          # Célba érés bonus
         self.w_gait = 0.5            # Gait timing [v21: BE — v20-ban 0.0 volt]
 
@@ -122,11 +127,16 @@ class RoboshelfRetailNavEnv(gym.Env):
         self.w_ctrl = -0.001         # Aktuátor erőfeszítés (action²)
         self.w_contact = -0.0001     # Kontakt erők (cfrc_ext clip[-1,1]²)
 
-        # Skálázatlan iránybüntetések [ÚJ v21 — azonnal hatnak, penalty_scale NÉLKÜL]
-        self.w_orientation = -1.0    # Yaw eltérés (1-cos): v20: -2.0 skálázott → v21: -1.0 FIX
+        # Skálázatlan iránybüntetések [v21 — azonnal hatnak, penalty_scale NÉLKÜL]
+        self.w_orientation = -2.0    # Yaw eltérés (1-cos) [v22: -1.0→-2.0, erősebb]
         self.w_yaw_rate = -0.5       # Z-tengely körüli szögsebesség: pörgés büntetése
         self.w_lateral = -1.0        # Cél-merőleges (oldalazó) sebesség büntetése
         self.w_hip_yaw = -0.3        # Hip yaw ízületek alapállapottól való eltérése
+
+        # Lábstabilitás büntetések [ÚJ v22 — azonnal hatnak, penalty_scale NÉLKÜL]
+        self.w_feet_slip = -0.1      # Talajon lévő láb csúszása (lin_vel² × contact)
+        self.w_feet_distance = -1.0  # Lábak közötti min. távolság kényszer (0.15m alatt büntet)
+        self.feet_min_distance = 0.15  # m — ennél közelebb ne legyenek a lábak
 
         # Skálázott simasági büntetések [penalty_scale-lel, 0→1 curriculum]
         self.w_action_rate = -0.005  # Hirtelen akcióváltás büntetése
@@ -440,6 +450,30 @@ class RoboshelfRetailNavEnv(gym.Env):
             right_match = not (right_contact ^ right_should_contact)
             gait_reward = self.w_gait * (float(left_match) + float(right_match))
 
+        # 12. Lábcsúszás büntetés [ÚJ v22 — penalty_scale NÉLKÜL, azonnal hat]
+        # Ha a láb érinti a talajt (kontakt erő > 1N) ÉS mozog → csúszás → büntetés
+        # Forrás: legged_gym feet_slip komponens
+        feet_slip_penalty = 0.0
+        if self._left_foot_id is not None and self.w_feet_slip != 0.0:
+            for foot_id in (self._left_foot_id, self._right_foot_id):
+                foot_contact = self.data.cfrc_ext[foot_id, 2] > 1.0  # z-irányú erő > 1N
+                if foot_contact:
+                    # Láb lineáris sebessége (world frame) — cvel [3:6] = lin vel
+                    foot_vel = self.data.body(foot_id).cvel[3:5]  # x,y komponens
+                    feet_slip_penalty += self.w_feet_slip * np.sum(np.square(foot_vel))
+
+        # 13. Lábak közötti távolság büntetés [ÚJ v22 — penalty_scale NÉLKÜL]
+        # Ha a két lábfej egymáshoz túl közel kerül → lábkeresztezés/ütközés büntetése
+        # Forrás: legged_gym feet_distance komponens
+        feet_distance_penalty = 0.0
+        if self._left_foot_id is not None and self.w_feet_distance != 0.0:
+            left_pos  = self.data.body(self._left_foot_id).xpos[:2]   # x,y
+            right_pos = self.data.body(self._right_foot_id).xpos[:2]  # x,y
+            foot_dist = np.linalg.norm(left_pos - right_pos)
+            if foot_dist < self.feet_min_distance:
+                violation = self.feet_min_distance - foot_dist
+                feet_distance_penalty = self.w_feet_distance * (violation ** 2)
+
         total_reward = (vel_tracking
                         + orientation_penalty + yaw_rate_penalty
                         + lateral_penalty + hip_yaw_penalty
@@ -447,7 +481,8 @@ class RoboshelfRetailNavEnv(gym.Env):
                         + healthy_reward + ctrl_cost + contact_cost
                         + goal_bonus + fall_penalty + air_time_reward
                         + action_rate_cost + dof_acc_cost + dof_vel_cost
-                        + gait_reward)
+                        + gait_reward
+                        + feet_slip_penalty + feet_distance_penalty)
 
         info = {
             "forward_reward": vel_tracking,
@@ -471,6 +506,8 @@ class RoboshelfRetailNavEnv(gym.Env):
             "fall_penalty": fall_penalty,
             "air_time_reward": air_time_reward,
             "gait_reward": gait_reward,
+            "feet_slip_penalty": feet_slip_penalty,
+            "feet_distance_penalty": feet_distance_penalty,
             "dist_to_target": dist_to_target,
             "dist_delta": dist_delta,
             "torso_z": self.data.body(self._torso_id).xpos[2],
@@ -509,8 +546,18 @@ class RoboshelfRetailNavEnv(gym.Env):
             self.data.qpos[2] = 0.79              # z — nem zajos, maradjon stabil magasság
             self.data.qpos[3] = 1.0               # qw — nem zajos
             self.data.qpos[4:7] = noise[4:7] * 0.001  # kis quaternion zaj
-            # Lábak: nulla + kis zaj
-            self.data.qpos[7:19] = noise[7:19]
+            # Lábak: guggoló alappóz [v22: unitree_rl_gym értékek]
+            # qpos[7:19] = 12 láb ízület (bal+jobb: hip_pitch, hip_roll, hip_yaw, knee, ankle_pitch, ankle_roll)
+            self.data.qpos[7:19] = noise[7:19]    # kis zaj alap
+            if self.model.nq >= 19:
+                # Bal láb: hip_pitch[7], knee[10], ankle_pitch[11]
+                self.data.qpos[7]  = -0.1 + noise[7]   # bal hip_pitch
+                self.data.qpos[10] =  0.3 + noise[10]  # bal knee
+                self.data.qpos[11] = -0.2 + noise[11]  # bal ankle_pitch
+                # Jobb láb: hip_pitch[13], knee[16], ankle_pitch[17]
+                self.data.qpos[13] = -0.1 + noise[13]  # jobb hip_pitch
+                self.data.qpos[16] =  0.3 + noise[16]  # jobb knee
+                self.data.qpos[17] = -0.2 + noise[17]  # jobb ankle_pitch
             # Derék: nulla + kis zaj
             self.data.qpos[19:22] = noise[19:22]
             # Karok: keyframe értékek + kis zaj
@@ -530,10 +577,30 @@ class RoboshelfRetailNavEnv(gym.Env):
         # Position control: ctrl = célpozíció. Nulla ctrl ≠ egyensúly!
         # A G1 keyframe ctrl értékei tartják fenn az egyensúlyi pozíciót.
         self._default_ctrl = np.zeros(self.model.nu)
-        # Lábak (12 aktuátor, index 0-11): nulla
+        # G1 aktuátor sorrend (lábak): hip_pitch[0/6], hip_roll[1/7], hip_yaw[2/8],
+        #   knee[3/9], ankle_pitch[4/10], ankle_roll[5/11]
         # Derék (3 aktuátor, index 12-14): nulla
         # Bal kar (7 aktuátor, index 15-21): [0.2, 0.2, 0, 1.28, 0, 0, 0]
         # Jobb kar (7 aktuátor, index 22-28): [0.2, -0.2, 0, 1.28, 0, 0, 0]
+
+        # [v22: GUGGOLÓ ALAPPÓZ — Unitree unitree_rl_gym alapján]
+        # v19 hiba: hip_pitch=+0.1 rad destabilizált (elesett ~30 lépésen belül)
+        # v22 fix: unitree_rl_gym hivatalos értékek — kisebb szögek, konzisztens irány
+        #   hip_pitch_joint: -0.1 rad (enyhe előre dőlés)
+        #   knee_joint:      +0.3 rad (enyhén hajlított térd)
+        #   ankle_pitch_joint: -0.2 rad (boka kompenzáció)
+        # Hatás: súlypont lejjebb, lábemelés lehetséges torzó-billenés nélkül
+        # Forrás: unitree_rl_gym/envs/g1_config.py default_joint_angles
+        if self.model.nu >= 12:
+            # Bal láb: hip_pitch[0], knee[3], ankle_pitch[4]
+            self._default_ctrl[0] = -0.1   # bal hip_pitch
+            self._default_ctrl[3] =  0.3   # bal knee
+            self._default_ctrl[4] = -0.2   # bal ankle_pitch
+            # Jobb láb: hip_pitch[6], knee[9], ankle_pitch[10]
+            self._default_ctrl[6] = -0.1   # jobb hip_pitch
+            self._default_ctrl[9] =  0.3   # jobb knee
+            self._default_ctrl[10] = -0.2  # jobb ankle_pitch
+
         if self.model.nu >= 29:
             self._default_ctrl[15] = 0.2
             self._default_ctrl[16] = 0.2
@@ -543,14 +610,6 @@ class RoboshelfRetailNavEnv(gym.Env):
             self._default_ctrl[23] = -0.2
             self._default_ctrl[24] = 0.0
             self._default_ctrl[25] = 1.28
-
-        # [v20: Hip lean ELTÁVOLÍTVA]
-        # v19 diagnózis: +0.1 rad hip_pitch az alappózt destabilizálta
-        #   v18: ep=166 (stabil állás) → v19: ep=31 (elesik ~30 lépésen belül)
-        #   A lean ötlet jó (emberi járás analógia), de kivitelezésre visszajelzés szükséges
-        #   Jövőbeli kísérlet: ankle_pitch lean + kisebb szög + graceful ramp-up
-        # G1 aktuátor sorrend ref (lábak): hip_pitch[0/6], hip_roll[1/7], hip_yaw[2/8],
-        #   knee[3/9], ankle_pitch[4/10], ankle_roll[5/11]
 
         self.data.ctrl[:] = self._default_ctrl.copy()
 
